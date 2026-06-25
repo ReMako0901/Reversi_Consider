@@ -14,6 +14,7 @@ const DIRECTIONS = [
 ];
 const FILE_LABELS = "ABCDEFGH";
 const INF = 1_000_000;
+const MAX_IMPORT_FILE_SIZE = 1024 * 1024;
 
 let board = [];
 let currentPlayer = BLACK;
@@ -31,9 +32,17 @@ let isCpuThinking = false;
 let cpuLevel = "normal";
 let cpuThinkingTimer = null;
 let cpuMoveRequestId = 0;
+let sideSelectionPending = false;
+let currentGameTitle = "棋譜";
+let isReviewBatchAnalyzing = false;
+let reviewBatchAnalysisId = 0;
 
 const elements = {
   board: document.querySelector("#board"),
+  analysisLoadingOverlay: document.querySelector("#analysisLoadingOverlay"),
+  sideChoiceOverlay: document.querySelector("#sideChoiceOverlay"),
+  chooseBlackButton: document.querySelector("#chooseBlackButton"),
+  chooseWhiteButton: document.querySelector("#chooseWhiteButton"),
   modeLabel: document.querySelector("#modeLabel"),
   gameModeLabel: document.querySelector("#gameModeLabel"),
   turnLabel: document.querySelector("#turnLabel"),
@@ -45,7 +54,11 @@ const elements = {
   cpuThinkingLabel: document.querySelector("#cpuThinkingLabel"),
   resetButton: document.querySelector("#resetButton"),
   reviewButton: document.querySelector("#reviewButton"),
+  jsonImportInput: document.querySelector("#jsonImportInput"),
+  jsonExportButton: document.querySelector("#jsonExportButton"),
+  importExportMessage: document.querySelector("#importExportMessage"),
   cpuLevelSelect: document.querySelector("#cpuLevelSelect"),
+  searchDepthField: document.querySelector("#searchDepthField"),
   depthSelect: document.querySelector("#depthSelect"),
   reviewControls: document.querySelector("#reviewControls"),
   playControlsPanel: document.querySelector("#playControlsPanel"),
@@ -57,6 +70,7 @@ const elements = {
   prevButton: document.querySelector("#prevButton"),
   nextButton: document.querySelector("#nextButton"),
   lastButton: document.querySelector("#lastButton"),
+  nextBranchButton: document.querySelector("#nextBranchButton"),
   exitReviewButton: document.querySelector("#exitReviewButton"),
   reviewMeta: document.querySelector("#reviewMeta"),
   analysisContent: document.querySelector("#analysisContent"),
@@ -67,16 +81,15 @@ const elements = {
 
 function initGame() {
   clearCpuThinking();
-  board = Array.from({ length: SIZE }, () => Array(SIZE).fill(EMPTY));
-  board[3][3] = WHITE;
-  board[4][4] = WHITE;
-  board[3][4] = BLACK;
-  board[4][3] = BLACK;
+  cancelReviewBatchAnalysis();
+  board = createInitialBoard();
 
   currentPlayer = BLACK;
   gameOver = false;
   mode = "play";
   reviewIndex = 0;
+  sideSelectionPending = gameMode === "cpu";
+  currentGameTitle = "棋譜";
   moveHistory = [];
   analysisHistory = [];
   analyzingMoveNumbers = new Set();
@@ -136,20 +149,29 @@ function renderStatus() {
   elements.modeLabel.textContent = mode === "play" ? "対局" : "検討";
   elements.gameModeLabel.textContent = gameMode === "cpu" ? "CPU対戦" : "2人対戦";
   const reviewRecord = mode === "review" ? moveHistory[reviewIndex] : null;
-  elements.turnLabel.textContent = playerLabel(reviewRecord ? reviewRecord.player : currentPlayer);
+  elements.turnLabel.textContent = sideSelectionPending ? "選択中" : playerLabel(reviewRecord ? reviewRecord.player : currentPlayer);
   elements.blackCount.textContent = counts.black;
   elements.whiteCount.textContent = counts.white;
   elements.reviewControls.classList.toggle("hidden", mode !== "review");
   elements.playControlsPanel.classList.toggle("hidden", mode === "review");
-  elements.blunderPanel.classList.toggle("hidden", mode === "review");
-  elements.readmePanel.classList.toggle("hidden", mode === "review");
+  elements.rankingPanel.classList.toggle("hidden", mode !== "review");
+  elements.blunderPanel.classList.toggle("hidden", mode !== "review");
+  elements.explanationPanel.classList.toggle("hidden", mode !== "review");
+  elements.analysisContent.closest(".panel").classList.toggle("hidden", mode !== "review");
+  elements.readmePanel?.classList.toggle("hidden", mode === "review");
   elements.reviewButton.disabled = moveHistory.length === 0 || isCpuThinking;
+  elements.jsonExportButton.disabled = moveHistory.filter((record) => !record.isPass).length === 0 || isCpuThinking;
   elements.humanModeButton.classList.toggle("active", gameMode === "human");
   elements.cpuModeButton.classList.toggle("active", gameMode === "cpu");
   elements.humanModeButton.disabled = mode === "review" || isCpuThinking;
   elements.cpuModeButton.disabled = mode === "review" || isCpuThinking;
   elements.cpuLevelSelect.disabled = gameMode !== "cpu" || mode === "review" || isCpuThinking;
+  elements.searchDepthField.classList.toggle("hidden", mode !== "play" || gameMode !== "cpu" || cpuLevel !== "hard");
+  elements.depthSelect.disabled = gameMode !== "cpu" || cpuLevel !== "hard" || mode === "review" || isCpuThinking;
+  elements.nextBranchButton.disabled = mode !== "review" || getNextBranchIndex(reviewIndex) === null || isReviewBatchAnalyzing;
   elements.cpuThinkingLabel.classList.toggle("hidden", !isCpuThinking);
+  elements.sideChoiceOverlay.classList.toggle("hidden", mode !== "play" || gameMode !== "cpu" || !sideSelectionPending);
+  elements.analysisLoadingOverlay.classList.toggle("hidden", !isReviewBatchAnalyzing);
 
   if (mode === "review") {
     const record = moveHistory[reviewIndex];
@@ -173,6 +195,8 @@ function renderStatus() {
   if (gameOver) {
     const result = getResultText(countDiscs(board));
     elements.message.textContent = `対局終了: ${result}`;
+  } else if (sideSelectionPending) {
+    elements.message.textContent = "CPU対戦で使う色を選んでください。";
   } else if (isCpuThinking) {
     elements.message.textContent = "CPU思考中...";
   } else if (isCpuTurn()) {
@@ -188,6 +212,15 @@ function getDisplayBoard() {
     return moveHistory[reviewIndex].boardAfter;
   }
   return board;
+}
+
+function createInitialBoard() {
+  const initialBoard = Array.from({ length: SIZE }, () => Array(SIZE).fill(EMPTY));
+  initialBoard[3][3] = WHITE;
+  initialBoard[4][4] = WHITE;
+  initialBoard[3][4] = BLACK;
+  initialBoard[4][3] = BLACK;
+  return initialBoard;
 }
 
 function getOpponent(player) {
@@ -237,6 +270,7 @@ function getFlippableDiscs(targetBoard, row, col, player) {
 function handleCellClick(row, col) {
   if (mode !== "play") return;
   if (gameOver) return;
+  if (sideSelectionPending) return;
   if (isCpuThinking) return;
   if (gameMode === "cpu" && currentPlayer === cpuPlayer) return;
   makeMove(row, col);
@@ -328,18 +362,30 @@ function setGameMode(nextMode) {
   resetGame();
 }
 
+function chooseHumanSide(player) {
+  if (gameMode !== "cpu" || mode !== "play" || !sideSelectionPending) return;
+  humanPlayer = player;
+  cpuPlayer = getOpponent(player);
+  currentPlayer = BLACK;
+  sideSelectionPending = false;
+  renderAll();
+  maybeTriggerCpuMove();
+}
+
 function setCpuLevel(level) {
   if (!["easy", "normal", "hard"].includes(level)) return;
   cpuLevel = level;
+  renderStatus();
 }
 
 function isCpuTurn() {
-  return mode === "play" && gameMode === "cpu" && currentPlayer === cpuPlayer;
+  return mode === "play" && gameMode === "cpu" && !sideSelectionPending && currentPlayer === cpuPlayer;
 }
 
 function canHumanPlayCurrentTurn() {
   if (mode !== "play") return false;
   if (gameOver) return false;
+  if (sideSelectionPending) return false;
   if (isCpuThinking) return false;
   if (gameMode === "cpu" && currentPlayer === cpuPlayer) return false;
   return true;
@@ -408,6 +454,7 @@ function hasAnyLegalMove(targetBoard, player) {
 function maybeTriggerCpuMove() {
   if (mode !== "play") return;
   if (gameMode !== "cpu") return;
+  if (sideSelectionPending) return;
   if (currentPlayer !== cpuPlayer) return;
   if (gameOver) return;
   if (isCpuThinking) return;
@@ -520,6 +567,16 @@ function clearCpuThinking() {
   isCpuThinking = false;
 }
 
+function setReviewAnalysisLoading(isLoading) {
+  isReviewBatchAnalyzing = isLoading;
+  elements.analysisLoadingOverlay.classList.toggle("hidden", !isLoading);
+}
+
+function cancelReviewBatchAnalysis() {
+  reviewBatchAnalysisId += 1;
+  setReviewAnalysisLoading(false);
+}
+
 function moveToLabel(row, col) {
   return `${FILE_LABELS[col]}${row + 1}`;
 }
@@ -535,11 +592,13 @@ function enterReviewMode() {
   if (reviewableIndexes.length === 0) return;
   mode = "review";
   reviewIndex = reviewableIndexes[0];
+  setReviewAnalysisLoading(true);
   renderReviewPosition();
   analyzeAllMoves();
 }
 
 function exitReviewMode() {
+  cancelReviewBatchAnalysis();
   mode = "play";
   renderAll();
 }
@@ -550,7 +609,7 @@ function renderReviewPosition() {
     if (nextIndex !== undefined) reviewIndex = nextIndex;
   }
   renderAll();
-  if (moveHistory[reviewIndex]) {
+  if (moveHistory[reviewIndex] && !isReviewBatchAnalyzing) {
     ensureAnalysisForReviewIndex(reviewIndex);
   }
 }
@@ -576,6 +635,12 @@ function goToLastMove() {
   if (lastIndex !== undefined) goToReviewIndex(lastIndex);
 }
 
+async function goToNextBranch() {
+  const nextBranchIndex = getNextBranchIndex(reviewIndex);
+  if (nextBranchIndex === null) return;
+  goToReviewIndex(nextBranchIndex);
+}
+
 function goToReviewIndex(index) {
   if (moveHistory.length === 0) return;
   const clampedIndex = clamp(index, 0, moveHistory.length - 1);
@@ -595,6 +660,19 @@ function getPreviousReviewableIndex(index) {
 
 function getNextReviewableIndex(index) {
   return getReviewableMoveIndexes().find((reviewableIndex) => reviewableIndex > index) ?? null;
+}
+
+function getNextBranchIndex(index) {
+  return getReviewableMoveIndexes().find((reviewableIndex) => {
+    if (reviewableIndex <= index) return false;
+    const record = moveHistory[reviewableIndex];
+    const saved = record ? getAnalysisForMove(record.moveNumber) : null;
+    return isDivergentMoveAnalysis(saved);
+  }) ?? null;
+}
+
+function isDivergentMoveAnalysis(saved) {
+  return Boolean(saved?.evaluatedMove && !sameMove(saved.evaluatedMove.chosenMove, saved.evaluatedMove.bestMove));
 }
 
 function analyzePosition(targetBoard, player) {
@@ -950,10 +1028,22 @@ function highlightBestMove() {
 }
 
 async function analyzeAllMoves() {
-  for (let index = 0; index < moveHistory.length; index += 1) {
-    if (shouldSkipReviewAnalysis(moveHistory[index])) continue;
-    await ensureAnalysisForReviewIndex(index);
-    renderBlunderList();
+  const batchId = ++reviewBatchAnalysisId;
+  setReviewAnalysisLoading(true);
+  await waitForPaint();
+
+  try {
+    for (let index = 0; index < moveHistory.length; index += 1) {
+      if (batchId !== reviewBatchAnalysisId || mode !== "review") break;
+      if (shouldSkipReviewAnalysis(moveHistory[index])) continue;
+      await ensureAnalysisForReviewIndex(index);
+      renderBlunderList();
+    }
+  } finally {
+    if (batchId === reviewBatchAnalysisId) {
+      setReviewAnalysisLoading(false);
+      renderAll();
+    }
   }
 }
 
@@ -1283,15 +1373,253 @@ function stableGainAfterMove(targetBoard, player, move) {
   return after - before;
 }
 
+async function importGameJson(file) {
+  if (!file) return;
+
+  if (!file.name.toLowerCase().endsWith(".json")) {
+    showImportExportMessage("拡張子が .json のファイルを選んでください。", "error");
+    alert("拡張子が .json のファイルを選んでください。");
+    return;
+  }
+  if (file.size > MAX_IMPORT_FILE_SIZE) {
+    showImportExportMessage("JSONファイルが大きすぎます。1MB以下にしてください。", "error");
+    alert("JSONファイルが大きすぎます。1MB以下にしてください。");
+    return;
+  }
+
+  let parsedData;
+  try {
+    parsedData = JSON.parse(await file.text());
+  } catch {
+    showImportExportMessage("JSONの形式が壊れています。", "error");
+    alert("JSONの形式が壊れています");
+    return;
+  }
+
+  const validation = validateImportedGameData(parsedData);
+  if (!validation.valid) {
+    showImportExportMessage(validation.message, "error");
+    alert(validation.message);
+    return;
+  }
+
+  const normalizedData = normalizeGameData(parsedData);
+  const result = applyImportedMoves(normalizedData.moves);
+  if (!result.valid) {
+    showImportExportMessage(result.message, "error");
+    alert(result.message);
+    return;
+  }
+
+  currentGameTitle = normalizedData.title;
+  showImportExportMessage(`JSONを読み込みました: ${currentGameTitle}`, "success");
+  if (moveHistory.length > 0) {
+    enterReviewMode();
+  }
+}
+
+function exportGameJson() {
+  const moves = moveHistory
+    .filter((record) => !record.isPass && record.move)
+    .map((record) => record.moveLabel.toLowerCase());
+
+  if (moves.length === 0) {
+    showImportExportMessage("書き出せる棋譜がありません。", "error");
+    return;
+  }
+
+  const counts = countDiscs(board);
+  const data = {
+    version: 1,
+    app: "Reversi_Consider",
+    title: currentGameTitle || "棋譜",
+    createdAt: new Date().toISOString(),
+    moves,
+    gameMode,
+    humanPlayer,
+    cpuPlayer,
+    result: gameOver ? getResultText(counts) : null,
+    moveRecords: moveHistory.map((record) => ({
+      moveNumber: record.moveNumber,
+      player: record.player,
+      actor: record.actor,
+      move: record.moveLabel.toLowerCase(),
+      isPass: record.isPass,
+      blackCount: record.blackCount,
+      whiteCount: record.whiteCount,
+    })),
+    analysisHistory: analysisHistory
+      .filter((entry) => entry.evaluatedMove)
+      .map((entry) => ({
+        moveNumber: entry.moveNumber,
+        chosenLabel: entry.evaluatedMove.chosenLabel,
+        bestLabel: entry.evaluatedMove.bestLabel,
+        scoreLoss: entry.evaluatedMove.scoreLoss,
+        accuracy: entry.evaluatedMove.accuracy,
+        judgement: entry.evaluatedMove.judgement,
+        reasonTags: entry.evaluatedMove.reasonTags,
+        explanationSource: entry.explanationSource,
+      })),
+  };
+
+  downloadJson(data, `reversi-record-${formatTimestampForFilename(new Date())}.json`);
+  showImportExportMessage("JSONを書き出しました。", "success");
+}
+
+function validateImportedGameData(data) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    return { valid: false, message: "JSONの一番外側はオブジェクトにしてください。" };
+  }
+  if (!Object.prototype.hasOwnProperty.call(data, "moves")) {
+    return { valid: false, message: "moves 配列が見つかりません。" };
+  }
+  if (!Array.isArray(data.moves)) {
+    return { valid: false, message: "moves は配列にしてください。" };
+  }
+  if (data.moves.length < 1 || data.moves.length > 60) {
+    return { valid: false, message: "moves の手数は1以上60以下にしてください。" };
+  }
+
+  const normalizedMoves = [];
+  for (let index = 0; index < data.moves.length; index += 1) {
+    const move = data.moves[index];
+    const moveNumber = index + 1;
+    if (typeof move !== "string") {
+      return { valid: false, message: `${moveNumber}手目は文字列にしてください。` };
+    }
+    const normalizedMove = move.trim().toLowerCase();
+    if (!/^[a-h][1-8]$/.test(normalizedMove)) {
+      return { valid: false, message: `${moveNumber}手目の形式が不正です。` };
+    }
+    normalizedMoves.push(normalizedMove);
+  }
+
+  const legality = validateMovesAreLegal(normalizedMoves);
+  if (!legality.valid) return legality;
+
+  return { valid: true, message: "" };
+}
+
+function normalizeGameData(data) {
+  const rawTitle = typeof data.title === "string" ? data.title : "棋譜";
+  const title = rawTitle.trim().slice(0, 50) || "棋譜";
+  return {
+    title,
+    moves: data.moves.map((move) => move.trim().toLowerCase()),
+  };
+}
+
+function validateMovesAreLegal(moves) {
+  let testBoard = createInitialBoard();
+  let testPlayer = BLACK;
+
+  for (let index = 0; index < moves.length; index += 1) {
+    const moveNumber = index + 1;
+    const move = labelToMove(moves[index]);
+
+    if (!hasAnyLegalMove(testBoard, testPlayer)) {
+      const opponent = getOpponent(testPlayer);
+      if (hasAnyLegalMove(testBoard, opponent)) {
+        testPlayer = opponent;
+      } else {
+        return { valid: false, message: `${moveNumber}手目以降は終局後の手です。` };
+      }
+    }
+
+    if (!isValidMove(testBoard, move.row, move.col, testPlayer)) {
+      return { valid: false, message: `${moveNumber}手目 ${moves[index]} はこの局面では置けません。` };
+    }
+
+    testBoard = applyMove(testBoard, move.row, move.col, testPlayer);
+    const nextPlayer = getOpponent(testPlayer);
+    testPlayer = hasAnyLegalMove(testBoard, nextPlayer) || !hasAnyLegalMove(testBoard, testPlayer) ? nextPlayer : testPlayer;
+  }
+
+  return { valid: true, message: "" };
+}
+
+function applyImportedMoves(moves) {
+  clearCpuThinking();
+  gameMode = "human";
+  humanPlayer = BLACK;
+  cpuPlayer = WHITE;
+  board = createInitialBoard();
+  currentPlayer = BLACK;
+  gameOver = false;
+  mode = "play";
+  reviewIndex = 0;
+  sideSelectionPending = false;
+  moveHistory = [];
+  analysisHistory = [];
+  analyzingMoveNumbers = new Set();
+
+  for (let index = 0; index < moves.length; index += 1) {
+    const moveNumber = index + 1;
+    const move = labelToMove(moves[index]);
+    if (!isValidMove(board, move.row, move.col, currentPlayer)) {
+      return { valid: false, message: `${moveNumber}手目 ${moves[index]} はこの局面では置けません。` };
+    }
+    playMove(move.row, move.col, currentPlayer);
+    switchTurn();
+    checkGameOver();
+    if (gameOver && index < moves.length - 1) {
+      return { valid: false, message: `${moveNumber + 1}手目以降は終局後の手です。` };
+    }
+  }
+
+  renderAll();
+  return { valid: true, message: "" };
+}
+
+function downloadJson(data, filename) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function showImportExportMessage(message, type = "success") {
+  elements.importExportMessage.textContent = message;
+  elements.importExportMessage.classList.remove("success", "error");
+  elements.importExportMessage.classList.add(type);
+}
+
+function labelToMove(label) {
+  return {
+    row: Number(label[1]) - 1,
+    col: FILE_LABELS.indexOf(label[0].toUpperCase()),
+  };
+}
+
+function formatTimestampForFilename(date) {
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
+}
+
 elements.resetButton.addEventListener("click", resetGame);
 elements.humanModeButton.addEventListener("click", () => setGameMode("human"));
 elements.cpuModeButton.addEventListener("click", () => setGameMode("cpu"));
+elements.chooseBlackButton.addEventListener("click", () => chooseHumanSide(BLACK));
+elements.chooseWhiteButton.addEventListener("click", () => chooseHumanSide(WHITE));
+elements.jsonExportButton.addEventListener("click", exportGameJson);
+elements.jsonImportInput.addEventListener("change", (event) => {
+  const file = event.target.files[0];
+  importGameJson(file).finally(() => {
+    event.target.value = "";
+  });
+});
 elements.reviewButton.addEventListener("click", enterReviewMode);
 elements.exitReviewButton.addEventListener("click", exitReviewMode);
 elements.firstButton.addEventListener("click", goToFirstMove);
 elements.prevButton.addEventListener("click", goToPreviousMove);
 elements.nextButton.addEventListener("click", goToNextMove);
 elements.lastButton.addEventListener("click", goToLastMove);
+elements.nextBranchButton.addEventListener("click", goToNextBranch);
 elements.cpuLevelSelect.addEventListener("change", (event) => {
   setCpuLevel(event.target.value);
 });
@@ -1299,6 +1627,7 @@ elements.depthSelect.addEventListener("change", (event) => {
   searchDepth = Number(event.target.value);
   analysisHistory = [];
   if (mode === "review") {
+    setReviewAnalysisLoading(true);
     renderReviewPosition();
     analyzeAllMoves();
   }
