@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>オセロ棋譜検討アプリ</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="app-header">
+        <div>
+          <p class="eyebrow">Reversi Review</p>
+          <h1>オセロ棋譜検討アプリ</h1>
+        </div>
+        <div class="status-grid" aria-live="polite">
+          <div class="status-card">
+            <span>モード</span>
+            <strong id="modeLabel">対局</strong>
+          </div>
+          <div class="status-card">
+            <span>対戦</span>
+            <strong id="gameModeLabel">2人対戦</strong>
+          </div>
+          <div class="status-card">
+            <span>手番</span>
+            <strong id="turnLabel">黒</strong>
+          </div>
+          <div class="status-card">
+            <span>石数</span>
+            <strong><span id="blackCount">2</span> - <span id="whiteCount">2</span></strong>
+          </div>
+        </div>
+      </header>
+
+      <section class="layout">
+        <section class="board-section" aria-label="オセロ盤">
+          <div id="board" class="board"></div>
+          <p id="message" class="message">黒の手番です。</p>
+        </section>
+
+        <section class="right-column">
+          <aside class="side-panel">
+          <section id="playControlsPanel" class="panel">
+            <h2>対局操作</h2>
+            <div class="mode-switch" aria-label="対局モード">
+              <button id="humanModeButton" type="button" class="mode-button active">2人対戦</button>
+              <button id="cpuModeButton" type="button" class="mode-button">CPU対戦</button>
+            </div>
+            <p id="cpuThinkingLabel" class="thinking-label hidden">CPU思考中...</p>
+            <div class="button-row">
+              <button id="resetButton" type="button">リセット</button>
+              <button id="reviewButton" type="button">検討する</button>
+            </div>
+            <label class="field">
+              <span>CPU難易度</span>
+              <select id="cpuLevelSelect">
+                <option value="easy">easy: ランダム</option>
+                <option value="normal" selected>normal: 簡易評価</option>
+                <option value="hard">hard: 探索AI</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>AI探索深さ</span>
+              <select id="depthSelect">
+                <option value="2">2</option>
+                <option value="3">3</option>
+                <option value="4" selected>4</option>
+                <option value="5">5</option>
+                <option value="6">6</option>
+              </select>
+            </label>
+          </section>
+
+          <section id="reviewControls" class="panel hidden">
+            <h2>検討操作</h2>
+            <div class="button-grid">
+              <button id="firstButton" type="button">最初へ</button>
+              <button id="prevButton" type="button">前の手</button>
+              <button id="nextButton" type="button">次の手</button>
+              <button id="lastButton" type="button">最後へ</button>
+            </div>
+            <button id="exitReviewButton" type="button" class="full-button">対局画面に戻る</button>
+            <p id="reviewMeta" class="review-meta">まだ棋譜がありません。</p>
+          </section>
+
+          <section id="analysisPanel" class="panel">
+            <h2>AI評価</h2>
+            <div id="analysisContent" class="muted">検討モードで手を選ぶと評価を表示します。</div>
+          </section>
+          </aside>
+
+          <section class="lower-grid">
+            <section id="rankingPanel" class="panel">
+              <h2>候補手ランキング</h2>
+              <ol id="rankingList" class="ranking-list"></ol>
+            </section>
+
+            <section id="blunderPanel" class="panel">
+              <h2>悪手一覧</h2>
+              <div id="blunderList" class="blunder-list muted">scoreLoss が36以上の手を表示します。</div>
+            </section>
+
+            <section id="explanationPanel" class="panel">
+              <h2>解説</h2>
+              <p id="explanationText" class="explanation muted">検討モードで解析すると、ルールベースの簡易解説を表示します。</p>
+            </section>
+          </section>
+        </section>
+      </section>
+
+      <section id="readmePanel" class="panel readme-panel">
+        <h2>使い方メモ</h2>
+        <p>
+          黒が先手です。2人対戦とCPU対戦を切り替えられます。合法手は盤面上に薄い丸で表示され、打つたびに棋譜が保存されます。
+          「検討する」から1手ずつ再生し、ローカルAIの推奨手、accuracy、scoreLoss、判定を確認できます。
+        </p>
+        <p>
+          scoreLoss はAI推奨手との差、accuracy は100点満点の目安です。GPT API連携は設計だけ用意しており、
+          サーバー側に <code>/api/explain-move</code> を実装すると自然文解説へ差し替えられます。
+        </p>
+      </section>
+    </main>
+
+    <script src="main.js"></script>
+  </body>
+</html>
