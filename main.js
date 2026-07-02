@@ -15,6 +15,10 @@ const DIRECTIONS = [
 const FILE_LABELS = "ABCDEFGH";
 const INF = 1_000_000;
 const MAX_IMPORT_FILE_SIZE = 1024 * 1024;
+const ENDGAME_EXACT_EMPTY_LIMIT = 10;
+const TERMINAL_DISC_WEIGHT = 16;
+const TERMINAL_WIN_BONUS = 120;
+const EXPLAIN_API_URL = null;
 
 let board = [];
 let currentPlayer = BLACK;
@@ -146,6 +150,7 @@ function renderBoard() {
 
 function renderStatus() {
   const counts = countDiscs(getDisplayBoard());
+  document.body.classList.toggle("cpu-mode", gameMode === "cpu");
   elements.modeLabel.textContent = mode === "play" ? "対局" : "検討";
   elements.gameModeLabel.textContent = gameMode === "cpu" ? "CPU対戦" : "2人対戦";
   const reviewRecord = mode === "review" ? moveHistory[reviewIndex] : null;
@@ -159,7 +164,7 @@ function renderStatus() {
   elements.explanationPanel.classList.toggle("hidden", mode !== "review");
   elements.analysisContent.closest(".panel").classList.toggle("hidden", mode !== "review");
   elements.readmePanel?.classList.toggle("hidden", mode === "review");
-  elements.reviewButton.disabled = moveHistory.length === 0 || isCpuThinking;
+  elements.reviewButton.disabled = getReviewableMoveIndexes().length === 0 || isCpuThinking;
   elements.jsonExportButton.disabled = moveHistory.filter((record) => !record.isPass).length === 0 || isCpuThinking;
   elements.humanModeButton.classList.toggle("active", gameMode === "human");
   elements.cpuModeButton.classList.toggle("active", gameMode === "cpu");
@@ -184,7 +189,7 @@ function renderStatus() {
     const actorLabel = record.actor === "cpu" ? "CPU" : "人間";
     const visiblePosition = getReviewableMoveIndexes().indexOf(reviewIndex) + 1;
     const visibleCount = getReviewableMoveIndexes().length;
-    elements.reviewMeta.textContent = `現在: ${visiblePosition}手目 / ${visibleCount}手目、棋譜上: ${record.moveNumber}手目、手番: ${playerLabel(record.player)}、実際の手: ${record.isPass ? "パス" : record.moveLabel}、打ち手: ${actorLabel}`;
+    elements.reviewMeta.textContent = `検討 ${visiblePosition} / ${visibleCount} ・ 棋譜${record.moveNumber}手目 ・ ${playerLabel(record.player)} ${record.isPass ? "パス" : record.moveLabel}（${actorLabel}）`;
     elements.firstButton.disabled = getPreviousReviewableIndex(reviewIndex) === null;
     elements.prevButton.disabled = getPreviousReviewableIndex(reviewIndex) === null;
     elements.nextButton.disabled = getNextReviewableIndex(reviewIndex) === null;
@@ -433,7 +438,7 @@ function getMoveActor(player) {
 }
 
 function shouldSkipReviewAnalysis(moveRecord) {
-  return moveRecord && moveRecord.gameMode === "cpu" && (moveRecord.actor === "cpu" || moveRecord.player === cpuPlayer);
+  return moveRecord && moveRecord.gameMode === "cpu" && moveRecord.actor === "cpu";
 }
 
 function isReviewableMove(moveRecord) {
@@ -635,7 +640,7 @@ function goToLastMove() {
   if (lastIndex !== undefined) goToReviewIndex(lastIndex);
 }
 
-async function goToNextBranch() {
+function goToNextBranch() {
   const nextBranchIndex = getNextBranchIndex(reviewIndex);
   if (nextBranchIndex === null) return;
   goToReviewIndex(nextBranchIndex);
@@ -678,7 +683,7 @@ function isDivergentMoveAnalysis(saved) {
 function analyzePosition(targetBoard, player) {
   const moves = getSortedMoves(targetBoard, player);
   const emptyCount = getEmptyCount(targetBoard);
-  const depth = emptyCount <= 14 ? emptyCount : searchDepth;
+  const depth = emptyCount <= ENDGAME_EXACT_EMPTY_LIMIT ? emptyCount : searchDepth;
 
   if (moves.length === 0) {
     const score = isTerminalPosition(targetBoard)
@@ -812,7 +817,8 @@ function moveSortScore(targetBoard, move, player) {
 function getTerminalScore(targetBoard, player) {
   const counts = countDiscs(targetBoard);
   const diff = counts[player] - counts[getOpponent(player)];
-  return diff * 1000;
+  if (diff === 0) return 0;
+  return diff * TERMINAL_DISC_WEIGHT + Math.sign(diff) * TERMINAL_WIN_BONUS;
 }
 
 function evaluateChosenMove(moveRecord, analysis) {
@@ -970,7 +976,7 @@ function renderAnalysisPanel() {
       <div class="metric"><span>悪手度 scoreLoss</span><strong>${evaluated.scoreLoss}</strong></div>
     </div>
     <p><span class="judgement ${judgementClass}">${evaluated.judgement}</span></p>
-    <p>${evaluated.reasonTags.map((tag) => `<span class="tag">${tag}</span>`).join("")}</p>
+    <p>${evaluated.reasonTags.map((tag) => `<span class="tag">${formatTagLabel(tag)}</span>`).join("")}</p>
   `;
   elements.explanationText.textContent = saved.explanation || "解説を生成中です。";
 }
@@ -1013,7 +1019,7 @@ function renderMoveRanking() {
         ${isBest ? '<span class="badge">AI推奨</span>' : ""}
         ${isActual ? '<span class="badge actual">実際の手</span>' : ""}
       </strong>
-      <span>${candidate.reasonTags.map((tag) => `<span class="tag">${tag}</span>`).join("")}</span>
+      <span>${candidate.reasonTags.map((tag) => `<span class="tag">${formatTagLabel(tag)}</span>`).join("")}</span>
     `;
     elements.rankingList.appendChild(item);
   });
@@ -1054,7 +1060,7 @@ function renderBlunderList() {
 
   elements.blunderList.innerHTML = "";
   if (blunders.length === 0) {
-    elements.blunderList.textContent = mode === "review" ? "今のところ悪手以上の手は見つかっていません。" : "scoreLoss が36以上の手を表示します。";
+    elements.blunderList.textContent = mode === "review" ? "今のところ悪手以上の手は見つかっていません。" : "評価損の大きかった手を自動で一覧にします。";
     elements.blunderList.classList.add("muted");
     return;
   }
@@ -1076,6 +1082,25 @@ function renderBlunderList() {
     });
     elements.blunderList.appendChild(button);
   });
+}
+
+// reasonTags の内部キーを画面表示用の短い日本語ラベルへ変換します。
+// 固定辞書の値のみを innerHTML に渡すため、外部入力が混ざらないようにしています。
+const TAG_LABELS = {
+  corner_taken: "角を確保",
+  corner_given: "角を献上",
+  x_square: "Xマス",
+  c_square: "Cマス",
+  mobility_down: "自分の手数減",
+  opponent_mobility_up: "相手の手数増",
+  too_many_flips: "返しすぎ",
+  stable_discs_gain: "安定石が増加",
+  endgame_loss: "終盤で損",
+  safe_move: "安全な手",
+};
+
+function formatTagLabel(tag) {
+  return TAG_LABELS[tag] || tag;
 }
 
 function getShortReasonText(reasonTags) {
@@ -1172,12 +1197,12 @@ async function requestGptExplanation(payload) {
     断定しすぎず、『この局面では』『〜しやすい』という表現を使ってください。石数だけでなく、
     角、Xマス、Cマス、合法手数、相手の選択肢を重視してください。」
   */
-  if (!location.protocol.startsWith("http")) return null;
+  if (!EXPLAIN_API_URL) return null;
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 1200);
   try {
-    const response = await fetch("/api/explain-move", {
+    const response = await fetch(EXPLAIN_API_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -1404,7 +1429,7 @@ async function importGameJson(file) {
   }
 
   const normalizedData = normalizeGameData(parsedData);
-  const result = applyImportedMoves(normalizedData.moves);
+  const result = applyImportedMoves(normalizedData);
   if (!result.valid) {
     showImportExportMessage(result.message, "error");
     alert(result.message);
@@ -1503,9 +1528,15 @@ function validateImportedGameData(data) {
 function normalizeGameData(data) {
   const rawTitle = typeof data.title === "string" ? data.title : "棋譜";
   const title = rawTitle.trim().slice(0, 50) || "棋譜";
+  const importedGameMode = data.gameMode === "cpu" ? "cpu" : "human";
+  const importedHumanPlayer = data.humanPlayer === WHITE ? WHITE : BLACK;
+  const importedCpuPlayer = getOpponent(importedHumanPlayer);
   return {
     title,
     moves: data.moves.map((move) => move.trim().toLowerCase()),
+    gameMode: importedGameMode,
+    humanPlayer: importedGameMode === "cpu" ? importedHumanPlayer : BLACK,
+    cpuPlayer: importedGameMode === "cpu" ? importedCpuPlayer : WHITE,
   };
 }
 
@@ -1538,11 +1569,12 @@ function validateMovesAreLegal(moves) {
   return { valid: true, message: "" };
 }
 
-function applyImportedMoves(moves) {
+function applyImportedMoves(gameData) {
   clearCpuThinking();
-  gameMode = "human";
-  humanPlayer = BLACK;
-  cpuPlayer = WHITE;
+  const moves = gameData.moves;
+  gameMode = gameData.gameMode;
+  humanPlayer = gameData.humanPlayer;
+  cpuPlayer = gameData.cpuPlayer;
   board = createInitialBoard();
   currentPlayer = BLACK;
   gameOver = false;
@@ -1630,6 +1662,27 @@ elements.depthSelect.addEventListener("change", (event) => {
     setReviewAnalysisLoading(true);
     renderReviewPosition();
     analyzeAllMoves();
+  }
+});
+
+// 検討モードのキーボード操作（← → で前後、Home/End で先頭・末尾）
+document.addEventListener("keydown", (event) => {
+  if (mode !== "review") return;
+  const target = event.target;
+  if (target instanceof HTMLElement && ["INPUT", "SELECT", "TEXTAREA"].includes(target.tagName)) return;
+
+  if (event.key === "ArrowLeft") {
+    event.preventDefault();
+    goToPreviousMove();
+  } else if (event.key === "ArrowRight") {
+    event.preventDefault();
+    goToNextMove();
+  } else if (event.key === "Home") {
+    event.preventDefault();
+    goToFirstMove();
+  } else if (event.key === "End") {
+    event.preventDefault();
+    goToLastMove();
   }
 });
 

@@ -7,131 +7,159 @@
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
-    <main class="app-shell">
-      <header class="app-header">
-        <div>
-          <p class="eyebrow">Reversi Review</p>
-          <h1>オセロ棋譜検討アプリ</h1>
-        </div>
-        <div class="status-grid" aria-live="polite">
-          <div class="status-card">
-            <span>モード</span>
-            <strong id="modeLabel">対局</strong>
-          </div>
-          <div class="status-card">
-            <span>対戦</span>
-            <strong id="gameModeLabel">2人対戦</strong>
-          </div>
-          <div class="status-card">
-            <span>手番</span>
-            <strong id="turnLabel">黒</strong>
-          </div>
-          <div class="status-card">
-            <span>石数</span>
-            <strong><span id="blackCount">2</span> - <span id="whiteCount">2</span></strong>
-          </div>
+    <div class="app">
+      <header class="topbar">
+        <h1 class="app-title">オセロ棋譜検討</h1>
+        <div class="topbar-status">
+          <span class="chip"><span class="chip-key">モード</span><strong id="modeLabel">対局</strong></span>
+          <span class="chip"><span class="chip-key">対戦</span><strong id="gameModeLabel">2人対戦</strong></span>
         </div>
       </header>
 
-      <section class="layout">
-        <section class="board-section" aria-label="オセロ盤">
+      <main class="layout">
+        <!-- 盤面カラム: スコア → 盤 → メッセージ → 検討トランスポート -->
+        <section class="board-column" aria-label="オセロ盤">
+          <div class="scoreboard" aria-live="polite">
+            <span class="score">
+              <span class="mini-disc black" aria-hidden="true"></span>
+              <strong id="blackCount">2</strong>
+            </span>
+            <span class="turn-box">
+              <span class="turn-key">手番</span>
+              <strong id="turnLabel">黒</strong>
+            </span>
+            <span class="score">
+              <strong id="whiteCount">2</strong>
+              <span class="mini-disc white" aria-hidden="true"></span>
+            </span>
+          </div>
+
           <div class="board-wrap">
             <div id="board" class="board"></div>
             <div id="sideChoiceOverlay" class="side-choice-overlay hidden">
               <div class="side-choice-panel">
-                <h2>あなたの色を選択</h2>
-                <p>CPU対戦を始める前に、黒か白を選んでください。</p>
+                <h2>あなたの色を選んでください</h2>
+                <p>黒が先手です。もう一方の色はCPUが受け持ちます。</p>
                 <div class="side-choice-buttons">
-                  <button id="chooseBlackButton" type="button" class="side-choice-button black-choice">黒で先手</button>
-                  <button id="chooseWhiteButton" type="button" class="side-choice-button white-choice">白で後手</button>
+                  <button id="chooseBlackButton" type="button" class="side-choice-button">
+                    <span class="mini-disc black" aria-hidden="true"></span>
+                    黒で先手
+                  </button>
+                  <button id="chooseWhiteButton" type="button" class="side-choice-button">
+                    <span class="mini-disc white" aria-hidden="true"></span>
+                    白で後手
+                  </button>
                 </div>
               </div>
             </div>
           </div>
+
           <p id="message" class="message">黒の手番です。</p>
-          <section id="blunderPanel" class="panel board-blunder-panel">
-            <h2>悪手一覧</h2>
-            <div id="blunderList" class="blunder-list muted">scoreLoss が36以上の手を表示します。</div>
+          <p id="cpuThinkingLabel" class="thinking-label hidden">CPU思考中...</p>
+
+          <section id="reviewControls" class="transport hidden" aria-label="検討操作">
+            <p id="reviewMeta" class="review-meta"></p>
+            <div class="transport-main">
+              <button id="firstButton" type="button" class="transport-button" title="最初の手へ">|&#9664;</button>
+              <button id="prevButton" type="button" class="transport-button strong">&#9664; 前の手</button>
+              <button id="nextButton" type="button" class="transport-button strong">次の手 &#9654;</button>
+              <button id="lastButton" type="button" class="transport-button" title="最後の手へ">&#9654;|</button>
+            </div>
+            <div class="transport-sub">
+              <button
+                id="nextBranchButton"
+                type="button"
+                class="branch-button"
+                title="AI推奨手と実際の手が分かれた、次の手へジャンプします"
+              >
+                次の分岐へ &#9873;
+              </button>
+              <button id="exitReviewButton" type="button" class="ghost-button">対局画面に戻る</button>
+            </div>
+            <p class="transport-hint">
+              盤上の<span class="legend legend-actual" aria-hidden="true"></span>は実際の手、<span
+                class="legend legend-best"
+                aria-hidden="true"
+              ></span
+              >はAI推奨手。「次の分岐へ」は両者がズレた手に移動します。&#8592; &#8594; キーでも操作できます。
+            </p>
           </section>
         </section>
 
-        <section class="right-column">
-          <aside class="side-panel">
+        <!-- サイドカラム: 対局中は設定、検討中は評価・解説 -->
+        <aside class="side-column">
           <section id="playControlsPanel" class="panel">
-            <h2>対局操作</h2>
-            <div class="mode-switch" aria-label="対局モード">
+            <h2>対局設定</h2>
+            <div class="mode-switch" role="group" aria-label="対局モード">
               <button id="humanModeButton" type="button" class="mode-button active">2人対戦</button>
               <button id="cpuModeButton" type="button" class="mode-button">CPU対戦</button>
             </div>
-            <p id="cpuThinkingLabel" class="thinking-label hidden">CPU思考中...</p>
-            <div class="button-row">
-              <button id="resetButton" type="button">リセット</button>
-              <button id="reviewButton" type="button">検討する</button>
+            <div class="cpu-settings">
+              <label class="field">
+                <span>CPU難易度</span>
+                <select id="cpuLevelSelect">
+                  <option value="easy">easy: ランダム</option>
+                  <option value="normal" selected>normal: 簡易評価</option>
+                  <option value="hard">hard: 探索AI</option>
+                </select>
+              </label>
+              <label id="searchDepthField" class="field hidden">
+                <span>AI探索深さ</span>
+                <select id="depthSelect">
+                  <option value="4" selected>4: 標準</option>
+                  <option value="6">6: 強め（少し重い）</option>
+                  <option value="8">8: かなり強め（重い）</option>
+                </select>
+              </label>
             </div>
-            <div class="json-tools">
-              <input id="jsonImportInput" class="file-input" type="file" accept=".json,application/json" />
-              <label for="jsonImportInput" class="file-button">JSON読み込み</label>
-              <button id="jsonExportButton" type="button">JSON書き出し</button>
+            <div class="action-row">
+              <button id="reviewButton" type="button" class="primary-button">検討する</button>
+              <button id="resetButton" type="button" class="ghost-button">リセット</button>
             </div>
-            <p id="importExportMessage" class="import-export-message" aria-live="polite"></p>
-            <label class="field">
-              <span>CPU難易度</span>
-              <select id="cpuLevelSelect">
-                <option value="easy">easy: ランダム</option>
-                <option value="normal" selected>normal: 簡易評価</option>
-                <option value="hard">hard: 探索AI</option>
-              </select>
-            </label>
-            <label id="searchDepthField" class="field hidden">
-              <span>AI探索深さ</span>
-              <select id="depthSelect">
-                <option value="4" selected>4: 標準</option>
-                <option value="6">6: 強め（少し重い）</option>
-                <option value="8">8: かなり強め（重い）</option>
-              </select>
-            </label>
+            <details class="file-tools">
+              <summary>棋譜ファイル（JSON）</summary>
+              <div class="file-tools-body">
+                <input id="jsonImportInput" class="file-input" type="file" accept=".json,application/json" />
+                <label for="jsonImportInput" class="file-button">読み込み</label>
+                <button id="jsonExportButton" type="button" class="ghost-button">書き出し</button>
+              </div>
+              <p id="importExportMessage" class="import-export-message" aria-live="polite"></p>
+            </details>
+            <p class="onboarding-hint">
+              対局が終わったら「検討する」で1手ずつ振り返れます。保存した棋譜（JSON）を読み込むと、そのまま検討を始められます。
+            </p>
           </section>
 
-          <section id="reviewControls" class="panel hidden">
-            <h2>検討操作</h2>
-            <div class="button-grid">
-              <button id="firstButton" type="button">最初へ</button>
-              <button id="lastButton" type="button">最後へ</button>
-              <button id="prevButton" type="button">前の手</button>
-              <button id="nextButton" type="button">次の手</button>
-            </div>
-            <button id="nextBranchButton" type="button" class="full-button branch-button">次の分岐へ</button>
-            <button id="exitReviewButton" type="button" class="full-button">対局画面に戻る</button>
-            <p id="reviewMeta" class="review-meta hidden"></p>
-          </section>
-
-          <section id="analysisPanel" class="panel">
+          <section id="analysisPanel" class="panel review-panel hidden">
             <h2>AI評価</h2>
             <div id="analysisContent" class="muted">検討モードで手を選ぶと評価を表示します。</div>
           </section>
-          </aside>
 
-          <section class="lower-grid">
-            <section id="rankingPanel" class="panel">
-              <h2>候補手ランキング</h2>
-              <ol id="rankingList" class="ranking-list"></ol>
-            </section>
-
-            <section id="explanationPanel" class="panel">
-              <h2>解説</h2>
-              <p id="explanationText" class="explanation muted">検討モードで解析すると、ルールベースの簡易解説を表示します。</p>
-            </section>
+          <section id="explanationPanel" class="panel review-panel hidden">
+            <h2>解説</h2>
+            <p id="explanationText" class="explanation muted">
+              検討モードで解析すると、ルールベースの簡易解説を表示します。
+            </p>
           </section>
-        </section>
-      </section>
 
-    </main>
+          <details id="rankingPanel" class="panel review-panel collapsible hidden" open>
+            <summary><span class="summary-title">候補手ランキング</span></summary>
+            <ol id="rankingList" class="ranking-list"></ol>
+          </details>
+
+          <details id="blunderPanel" class="panel review-panel collapsible hidden">
+            <summary><span class="summary-title">悪手一覧</span></summary>
+            <div id="blunderList" class="blunder-list muted">評価損の大きかった手を自動で一覧にします。</div>
+          </details>
+        </aside>
+      </main>
+    </div>
 
     <div id="analysisLoadingOverlay" class="analysis-loading-overlay hidden" role="status" aria-live="polite">
       <div class="analysis-loading-panel">
         <div class="loading-spinner" aria-hidden="true"></div>
-        <strong>解析中...</strong>
-        <p>棋譜をまとめて確認しています。しばらくお待ちください。</p>
+        <strong>棋譜を解析しています…</strong>
+        <p>手数が多いと少し時間がかかります。</p>
       </div>
     </div>
 
