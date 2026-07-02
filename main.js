@@ -81,6 +81,8 @@ const elements = {
   rankingList: document.querySelector("#rankingList"),
   blunderList: document.querySelector("#blunderList"),
   explanationText: document.querySelector("#explanationText"),
+  summaryPanel: document.querySelector("#summaryPanel"),
+  summaryContent: document.querySelector("#summaryContent"),
 };
 
 function initGame() {
@@ -108,6 +110,7 @@ function renderAll() {
   renderAnalysisPanel();
   renderMoveRanking();
   renderBlunderList();
+  renderGameSummary();
 }
 
 function renderBoard() {
@@ -162,6 +165,7 @@ function renderStatus() {
   elements.rankingPanel.classList.toggle("hidden", mode !== "review");
   elements.blunderPanel.classList.toggle("hidden", mode !== "review");
   elements.explanationPanel.classList.toggle("hidden", mode !== "review");
+  elements.summaryPanel.classList.toggle("hidden", mode !== "review");
   elements.analysisContent.closest(".panel").classList.toggle("hidden", mode !== "review");
   elements.readmePanel?.classList.toggle("hidden", mode === "review");
   elements.reviewButton.disabled = getReviewableMoveIndexes().length === 0 || isCpuThinking;
@@ -1401,6 +1405,353 @@ function getLearningTip(context) {
     default:
       return `次からは角・危険マス・お互いの打てる場所の3点を、順に確認してから打ちましょう。`;
   }
+}
+
+// ===== 対局全体の総評生成 =====
+// 解析済みの手（analysisHistory）から悪手・角の献上・モビリティ悪化・終盤損を集計し、
+// 「どこで勝敗が分かれたか」を選び出して文章化します。表示は DOM API + textContent のみ。
+
+function renderGameSummary() {
+  const container = elements.summaryContent;
+  container.textContent = "";
+  container.classList.add("muted");
+
+  if (mode !== "review") {
+    container.textContent = "検討モードで全体解析が終わると、1局の総評を表示します。";
+    return;
+  }
+  if (isReviewBatchAnalyzing) {
+    container.textContent = "総評を作成中...";
+    return;
+  }
+  if (moveHistory.length === 0) {
+    container.textContent = "まだ棋譜がありません。";
+    return;
+  }
+
+  const context = buildGameSummaryContext();
+  if (context.moves.length === 0) {
+    container.textContent = "採点対象の手がないため、総評を表示できません。";
+    return;
+  }
+
+  container.classList.remove("muted");
+  generateGameSummarySections(context).forEach((section) => {
+    const block = document.createElement("div");
+    block.className = section.heading ? "summary-section" : "summary-section summary-note";
+    if (section.heading) {
+      const heading = document.createElement("h3");
+      heading.textContent = section.heading;
+      block.appendChild(heading);
+    }
+    const body = document.createElement("p");
+    body.textContent = section.text;
+    block.appendChild(body);
+    if (section.jumpMoveNumber) {
+      const jump = document.createElement("button");
+      jump.type = "button";
+      jump.className = "summary-jump";
+      jump.textContent = `${section.jumpMoveNumber}手目を盤面で見る`;
+      jump.addEventListener("click", () => goToReviewIndex(section.jumpMoveNumber - 1));
+      block.appendChild(jump);
+    }
+    container.appendChild(block);
+  });
+}
+
+function buildGameSummaryContext() {
+  const lastRecord = moveHistory[moveHistory.length - 1];
+  const finalCounts = { black: lastRecord.blackCount, white: lastRecord.whiteCount };
+  const isCpuGame = moveHistory.some((record) => record.actor === "cpu");
+  const humanSide = isCpuGame ? (moveHistory.find((record) => record.actor === "human")?.player ?? BLACK) : null;
+
+  const moves = moveHistory
+    .map((record) => ({ record, saved: getAnalysisForMove(record.moveNumber) }))
+    .filter((item) => item.saved && !item.saved.skipped && item.saved.evaluatedMove)
+    .map(({ record, saved }) => {
+      const evaluated = saved.evaluatedMove;
+      const mobility = record.move ? countMobilityAfterMove(record.boardBefore, record.player, record.move) : null;
+      return {
+        moveNumber: record.moveNumber,
+        player: record.player,
+        label: evaluated.chosenLabel,
+        bestLabel: evaluated.bestLabel,
+        scoreLoss: evaluated.scoreLoss,
+        tags: evaluated.reasonTags,
+        phase: getPhase(record.boardBefore),
+        isPass: record.isPass,
+        opponentMobilityGain: mobility ? mobility.opponentLegalMovesAfter - mobility.opponentLegalMovesBefore : 0,
+        playerMobilityDrop: mobility ? mobility.playerLegalMovesBefore - mobility.playerLegalMovesAfter : 0,
+      };
+    });
+
+  const cornersByPlayer = { [BLACK]: 0, [WHITE]: 0 };
+  moveHistory.forEach((record) => {
+    if (record.move && isCorner(record.move.row, record.move.col)) cornersByPlayer[record.player] += 1;
+  });
+
+  return {
+    finalCounts,
+    finished: gameOver,
+    isCpuGame,
+    humanSide,
+    cpuSide: humanSide ? getOpponent(humanSide) : null,
+    winner: finalCounts.black === finalCounts.white ? null : finalCounts.black > finalCounts.white ? BLACK : WHITE,
+    moves,
+    cornersByPlayer,
+    expectedCount: getReviewableMoveIndexes().length,
+  };
+}
+
+function generateGameSummarySections(context) {
+  const sections = [];
+  const simple = context.expectedCount < 10;
+
+  if (context.moves.length < context.expectedCount) {
+    sections.push({ text: "未解析の手があるため、分かる範囲での総評です。" });
+  }
+  if (simple) {
+    sections.push({ text: "手数が少ないため、総評は簡易表示です。" });
+  }
+
+  sections.push({ heading: "対局結果", text: getFinalResultSummary(context) });
+
+  if (!simple) {
+    sections.push({ heading: "全体の流れ", text: describeGameFlow(context) });
+  }
+
+  const focusSide = getSummaryFocusSide(context);
+  const turningPoint = focusSide ? findTurningPoint(context, focusSide) : null;
+  if (turningPoint) {
+    const isWinnerSide = context.finished && context.winner === turningPoint.player;
+    sections.push({
+      heading: isWinnerSide ? "危なかった手" : "勝敗を分けた手",
+      text: describeTurningPoint(context, turningPoint),
+      jumpMoveNumber: turningPoint.moveNumber,
+    });
+  }
+
+  if (!simple) {
+    const winningFactor = describeWinningFactor(context);
+    if (winningFactor) sections.push({ heading: "勝因", text: winningFactor });
+  }
+
+  if (focusSide) {
+    sections.push({ heading: "次回の改善ポイント", text: describeImprovementAdvice(context, focusSide) });
+  }
+
+  return sections;
+}
+
+function summarySideName(context, player) {
+  if (!context.isCpuGame) return playerLabel(player);
+  return player === context.humanSide ? "あなた" : "CPU";
+}
+
+function getSummaryFocusSide(context) {
+  if (context.isCpuGame) return context.humanSide;
+  if (context.finished && context.winner) return getOpponent(context.winner);
+  // 引き分け・対局途中は、評価損の合計が大きい側を振り返り対象にします。
+  const lossBySide = { [BLACK]: 0, [WHITE]: 0 };
+  context.moves.forEach((move) => {
+    lossBySide[move.player] += move.scoreLoss;
+  });
+  return lossBySide[BLACK] >= lossBySide[WHITE] ? BLACK : WHITE;
+}
+
+function getFinalResultSummary(context) {
+  const { black, white } = context.finalCounts;
+  const prefix = context.finished ? "" : "対局はまだ途中です。ここまでの局面では、";
+
+  if (context.isCpuGame) {
+    const humanCount = context.humanSide === BLACK ? black : white;
+    const cpuCount = context.humanSide === BLACK ? white : black;
+    let outcome;
+    if (!context.finished) {
+      outcome = humanCount === cpuCount ? "石数は互角です。" : humanCount > cpuCount ? "あなたが石数でリードしています。" : "CPUが石数でリードしています。";
+    } else if (context.winner === null) {
+      outcome = "引き分けです。";
+    } else {
+      outcome = context.winner === context.humanSide ? "あなたの勝ちです。" : "CPUの勝ちです。";
+    }
+    return `${prefix}${playerLabel(context.humanSide)}（あなた）は${humanCount}石、${playerLabel(context.cpuSide)}（CPU）は${cpuCount}石。${outcome}`;
+  }
+
+  let outcome;
+  if (!context.finished) {
+    outcome = black === white ? "石数は互角です。" : `${black > white ? "黒" : "白"}がリードしています。`;
+  } else {
+    outcome = context.winner === null ? "引き分けです。" : `${playerLabel(context.winner)}の勝ちです。`;
+  }
+  return `${prefix}黒 ${black} - 白 ${white}。${outcome}`;
+}
+
+function describeGameFlow(context) {
+  const sentences = [];
+  const phases = [
+    ["opening", "序盤"],
+    ["middle", "中盤"],
+    ["endgame", "終盤"],
+  ];
+
+  phases.forEach(([phase, phaseName]) => {
+    const phaseMoves = context.moves.filter((move) => move.phase === phase);
+    if (phaseMoves.length === 0) return;
+    const blunders = phaseMoves.filter((move) => move.scoreLoss >= 36);
+    if (blunders.length === 0) {
+      sentences.push(
+        context.isCpuGame
+          ? `${phaseName}のあなたは大きなミスなく打てていました。`
+          : `${phaseName}は互いに大きなミスのない進行でした。`,
+      );
+      return;
+    }
+    const bySide = {};
+    blunders.forEach((move) => {
+      bySide[move.player] = (bySide[move.player] || 0) + 1;
+    });
+    const parts = Object.entries(bySide).map(([player, count]) => `${summarySideName(context, player)}に${count}回`);
+    sentences.push(`${phaseName}は${parts.join("、")}の悪手が出て形勢が動きました。`);
+  });
+
+  const cornerParts = [];
+  if (context.cornersByPlayer[BLACK] > 0) cornerParts.push(`${summarySideName(context, BLACK)}が${context.cornersByPlayer[BLACK]}つ`);
+  if (context.cornersByPlayer[WHITE] > 0) cornerParts.push(`${summarySideName(context, WHITE)}が${context.cornersByPlayer[WHITE]}つ`);
+  if (cornerParts.length > 0) {
+    sentences.push(`角は${cornerParts.join("、")}確保しました。`);
+  }
+
+  return sentences.join("");
+}
+
+function findTurningPoint(context, side) {
+  const candidates = context.moves.filter((move) => move.player === side && !move.isPass && move.scoreLoss >= 16);
+  if (candidates.length === 0) return null;
+
+  // 最大 scoreLoss だけでなく、角の献上・危険マス・モビリティ悪化・終盤の損に重みを付けて選びます。
+  const weight = (move) =>
+    move.scoreLoss +
+    (move.tags.includes("corner_given") ? 80 : 0) +
+    (move.tags.includes("x_square") || move.tags.includes("c_square") ? 40 : 0) +
+    (move.phase === "endgame" ? 30 : 0) +
+    (move.opponentMobilityGain >= 3 ? 20 : 0);
+
+  return candidates.reduce((best, move) => (weight(move) > weight(best) ? move : best));
+}
+
+function findBlunderStreak(context, side) {
+  const sideMoves = context.moves.filter((move) => move.player === side);
+  let best = null;
+  let run = [];
+  sideMoves.forEach((move) => {
+    if (move.scoreLoss >= 36) {
+      run.push(move);
+      if (run.length >= 2 && (!best || run.length > best.length)) best = [...run];
+    } else {
+      run = [];
+    }
+  });
+  return best ? { from: best[0].moveNumber, to: best[best.length - 1].moveNumber, count: best.length } : null;
+}
+
+function describeTurningPoint(context, turningPoint) {
+  const name = summarySideName(context, turningPoint.player);
+  const possessive = name === "あなた" ? "あなたの" : `${name}の`;
+  const isWinnerSide = context.finished && context.winner === turningPoint.player;
+
+  let cause;
+  if (turningPoint.tags.includes("corner_given")) {
+    cause = "この手で相手に角を取るチャンスを与え、以降は相手が角と辺を固めやすい流れになりました";
+  } else if (turningPoint.tags.includes("x_square") || turningPoint.tags.includes("c_square")) {
+    cause = "角の危険地帯（X・Cマス）に踏み込み、角をめぐる攻防で主導権を失うきっかけになりました";
+  } else if (turningPoint.phase === "endgame") {
+    cause = "終盤の石数計算で大きく損をし、その差を取り返す手が残っていませんでした";
+  } else if (turningPoint.opponentMobilityGain >= 3) {
+    cause = `相手の打てる場所を一気に${turningPoint.opponentMobilityGain}手増やし、主導権を渡す形になりました`;
+  } else {
+    cause = `AI推奨の${turningPoint.bestLabel}との評価差が最も大きかった手です`;
+  }
+
+  const intro = isWinnerSide
+    ? `勝ちはしたものの、一番危なかったのは${turningPoint.moveNumber}手目の${possessive}${turningPoint.label}です。`
+    : `流れが大きく傾いたのは${turningPoint.moveNumber}手目の${possessive}${turningPoint.label}です。`;
+  let text = `${intro}${cause}。`;
+
+  const streak = findBlunderStreak(context, turningPoint.player);
+  if (!isWinnerSide && streak && streak.to !== streak.from) {
+    text += `また、${streak.from}手目から${streak.to}手目にかけて悪手が続いた区間も形勢に響いています。`;
+  }
+  return text;
+}
+
+function describeWinningFactor(context) {
+  if (!context.finished || !context.winner) return "";
+  // CPUが勝った場合、CPUの手は採点対象外なので勝因は語らず、人間側の振り返りに任せます。
+  if (context.isCpuGame && context.winner !== context.humanSide) return "";
+
+  const winner = context.winner;
+  const winnerMoves = context.moves.filter((move) => move.player === winner);
+  if (winnerMoves.length === 0) return "";
+
+  const factors = [];
+  if (context.cornersByPlayer[winner] > 0) {
+    factors.push(`角を${context.cornersByPlayer[winner]}つ確保して返されない拠点を築いたこと`);
+  }
+  const blunderCount = winnerMoves.filter((move) => move.scoreLoss >= 36).length;
+  if (blunderCount === 0) {
+    factors.push("大きな悪手を打たずに崩れなかったこと");
+  }
+  const mobilityGainTotal = winnerMoves.reduce((sum, move) => sum + move.opponentMobilityGain, 0);
+  if (winnerMoves.length > 0 && mobilityGainTotal / winnerMoves.length <= 0) {
+    factors.push("相手の打てる場所を増やさない手を選び続けたこと");
+  }
+  const loser = getOpponent(winner);
+  const loserBlunders = context.moves.filter((move) => move.player === loser && move.scoreLoss >= 36).length;
+  if (!context.isCpuGame && loserBlunders >= 2 && factors.length < 2) {
+    factors.push(`${summarySideName(context, loser)}のミスを確実に活かしたこと`);
+  }
+
+  if (factors.length === 0) return "";
+  const name = summarySideName(context, winner);
+  return `${name}の勝因は、${factors.slice(0, 2).join("と、")}です。`;
+}
+
+function describeImprovementAdvice(context, side) {
+  const name = summarySideName(context, side);
+  const riskyMoves = context.moves.filter((move) => move.player === side && move.scoreLoss >= 16);
+
+  if (riskyMoves.length === 0) {
+    return `${name}に大きな改善点は見当たりません。角とお互いの選択肢を意識した、この打ち回しを続けましょう。`;
+  }
+
+  const categoryCounts = {
+    corner: riskyMoves.filter((move) => move.tags.includes("corner_given")).length,
+    xc: riskyMoves.filter((move) => move.tags.includes("x_square") || move.tags.includes("c_square")).length,
+    mobility: riskyMoves.filter(
+      (move) =>
+        move.tags.includes("opponent_mobility_up") ||
+        move.tags.includes("mobility_down") ||
+        move.tags.includes("too_many_flips"),
+    ).length,
+    endgame: riskyMoves.filter((move) => move.phase === "endgame").length,
+  };
+  const adviceTexts = {
+    corner: "角の周りに打つ前に「この手で相手が角へ届かないか」を確認すること",
+    xc: "X・Cマスには、角を取れる見通しが立つまで打たないこと",
+    mobility: "返す枚数よりも、打った後に自分の選択肢が残るかを優先すること",
+    endgame: "終盤は残りのマスを数えて、1手ごとの石数の増減を確かめること",
+  };
+
+  const ranked = Object.entries(categoryCounts)
+    .filter(([, count]) => count > 0)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 2)
+    .map(([category]) => adviceTexts[category]);
+
+  if (ranked.length === 0) {
+    return `${name}が次回意識したいのは、角・危険マス・お互いの打てる場所の3点を順に確認してから打つことです。`;
+  }
+  return `${name}が次回意識したいのは、${ranked.join("と、")}です。`;
 }
 
 function generateExplanationPayload(moveRecord, evaluatedMove, analysis) {
