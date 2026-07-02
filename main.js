@@ -1119,44 +1119,288 @@ function getShortReasonText(reasonTags) {
   return reasonTags.map((tag) => dictionary[tag] || tag).join(" ");
 }
 
-function generateTemplateExplanation(evaluatedMove) {
+// ===== ローカル解説生成 =====
+// 盤面情報から「この局面で何が大事か」を1つ選び、それを軸に2〜4文の解説を組み立てます。
+// 文章は moveNumber を種にしたバリエーション選択で、手ごとに言い回しが変わるようにしています。
+
+function pickVariant(seed, variants) {
+  return variants[Math.abs(seed) % variants.length];
+}
+
+function buildExplanationContext(moveRecord, evaluatedMove, analysis) {
+  const boardBefore = moveRecord.boardBefore;
+  const player = moveRecord.player;
+  const opponent = getOpponent(player);
+  const chosenMove = moveRecord.move;
+  const bestMove = analysis.bestMove;
+  const chosenResult = chosenMove
+    ? summarizeMoveResult(boardBefore, player, chosenMove)
+    : summarizePassResult(boardBefore, player);
+  const bestResult = bestMove
+    ? summarizeMoveResult(boardBefore, player, bestMove)
+    : summarizePassResult(boardBefore, player);
+  const chosenEvaluation = chosenMove
+    ? analysis.moveEvaluations.find((item) => sameMove(item.move, chosenMove))
+    : null;
+  const cornersGiven = chosenMove
+    ? getLegalMoves(applyMove(boardBefore, chosenMove.row, chosenMove.col, player), opponent)
+        .filter((move) => isCorner(move.row, move.col))
+        .map((move) => moveToLabel(move.row, move.col))
+    : [];
+
+  return {
+    moveNumber: moveRecord.moveNumber,
+    phase: getPhase(boardBefore),
+    emptyCount: getEmptyCount(boardBefore),
+    isPass: moveRecord.isPass,
+    playerName: playerLabel(player),
+    chosenLabel: evaluatedMove.chosenLabel,
+    bestLabel: evaluatedMove.bestLabel,
+    isBestChoice: Boolean(chosenMove && bestMove && sameMove(chosenMove, bestMove)),
+    scoreLoss: evaluatedMove.scoreLoss,
+    judgement: evaluatedMove.judgement,
+    reasonTags: evaluatedMove.reasonTags,
+    flippedCount: moveRecord.flipped.length,
+    chosenRank: chosenEvaluation ? chosenEvaluation.rank : null,
+    candidateCount: analysis.moveEvaluations.length,
+    mobility: chosenMove ? countMobilityAfterMove(boardBefore, player, chosenMove) : null,
+    opponentMovesAfterChosen: chosenResult.opponentLegalMovesAfter,
+    opponentMovesAfterBest: bestResult.opponentLegalMovesAfter,
+    playerMovesAfterChosen: chosenResult.playerLegalMovesAfter,
+    chosenIsCorner: Boolean(chosenMove && isCorner(chosenMove.row, chosenMove.col)),
+    chosenIsX: Boolean(chosenMove && isXSquare(chosenMove.row, chosenMove.col)),
+    chosenIsC: Boolean(chosenMove && isCSquare(chosenMove.row, chosenMove.col)),
+    chosenIsEdge: Boolean(chosenMove && isEdge(chosenMove.row, chosenMove.col)),
+    bestIsCorner: Boolean(bestMove && isCorner(bestMove.row, bestMove.col)),
+    givesCorner: cornersGiven.length > 0,
+    cornersGiven,
+    bestGivesCorner: Boolean(bestMove && wouldGiveCorner(boardBefore, player, bestMove)),
+    ownsAdjacentCorner: Boolean(
+      chosenMove &&
+        getAdjacentCorners(chosenMove.row, chosenMove.col).some(
+          (corner) => boardBefore[corner.row][corner.col] === player,
+        ),
+    ),
+    stableGain: chosenMove ? stableGainAfterMove(boardBefore, player, chosenMove) : 0,
+  };
+}
+
+function generateLocalExplanation(context) {
+  if (context.isPass) return describePassPosition(context);
+
+  const sentences = [describeJudgementIntro(context), describeMainFactor(context)];
+  const alternative = describeBestAlternative(context);
+  if (alternative) sentences.push(alternative);
+  const tip = getLearningTip(context);
+  if (tip) sentences.push(tip);
+
+  return sentences.filter(Boolean).join("");
+}
+
+function describePassPosition(context) {
+  const base = `打てる場所がなかったため、${context.playerName}はパスです。`;
+  if (context.phase === "endgame") {
+    return `${base}終盤のパスは相手に連続で打たれる分、石数勝負で不利になりやすい形です。`;
+  }
+  return `${base}合法手が尽きるのは選択肢を失っている合図なので、その前の数手で手を広げられなかったか振り返ってみましょう。`;
+}
+
+function describeJudgementIntro(context) {
+  const seed = context.moveNumber;
+
+  if (context.isBestChoice) {
+    if (context.phase === "endgame") {
+      return pickVariant(seed, [
+        `${context.chosenLabel}はこの終盤で最善の一手です。`,
+        `終盤の大事な場面で、最善手${context.chosenLabel}を選べています。`,
+      ]);
+    }
+    return pickVariant(seed, [
+      `この局面では${context.chosenLabel}が最善手です。`,
+      `${context.chosenLabel}はAIの第一候補と一致する好手です。`,
+      `${context.chosenLabel}は候補の中で最も評価の高い手です。`,
+    ]);
+  }
+  if (context.scoreLoss <= 15) {
+    return pickVariant(seed, [
+      `${context.chosenLabel}は大きな問題のない手です。AI推奨は${context.bestLabel}でしたが、評価の差はわずかです。`,
+      `悪くない選択です。最善は${context.bestLabel}でしたが、${context.chosenLabel}との差は小さめです。`,
+    ]);
+  }
+  if (context.scoreLoss <= 35) {
+    return pickVariant(seed, [
+      `${context.chosenLabel}はやや疑問の残る手です。AI推奨は${context.bestLabel}でした。`,
+      `ここは少しもったいない選択でした。実際の手は${context.chosenLabel}、AIの推奨は${context.bestLabel}です。`,
+    ]);
+  }
+  const endgameNote = context.phase === "endgame" ? "終盤は1手の損がそのまま石数に響くため、" : "";
+  return pickVariant(seed, [
+    `${context.chosenLabel}は明確な悪手です。${endgameNote}AI推奨の${context.bestLabel}と比べて大きな損が出ています。`,
+    `この${context.chosenLabel}は形勢を悪くした手です。${endgameNote}AIは${context.bestLabel}を推しています。`,
+  ]);
+}
+
+function selectMainFactor(context) {
+  const tags = context.reasonTags;
+  if (context.chosenIsCorner || tags.includes("corner_taken")) return "corner_taken";
+  if (context.givesCorner || tags.includes("corner_given")) return "corner_given";
+  if (context.phase === "endgame" && context.scoreLoss >= 16) return "endgame_loss";
+  if (context.chosenIsX || tags.includes("x_square")) return "x_square";
+  if (context.chosenIsC || tags.includes("c_square")) return "c_square";
+  if (tags.includes("opponent_mobility_up") || tags.includes("mobility_down")) return "mobility";
+  if (tags.includes("too_many_flips")) return "too_many_flips";
+  if (context.stableGain > 0 || tags.includes("stable_discs_gain")) return "stable_discs_gain";
+  return "safe";
+}
+
+function describeMainFactor(context) {
+  const seed = context.moveNumber;
+
+  switch (selectMainFactor(context)) {
+    case "corner_taken":
+      if (context.scoreLoss >= 16) {
+        return `角を確保できた点は悪くありませんが、この局面ではさらに価値の高い手が残っており、取るタイミングとしては損が出ています。`;
+      }
+      return pickVariant(seed, [
+        `角は一度取れば返されない拠点になり、周りの石も順に安定していきます。${context.stableGain > 0 ? `この手で安定石が${context.stableGain}枚増えました。` : ""}`,
+        `角の確保は盤面全体の主導権につながる大きなプラスです。`,
+      ]);
+    case "corner_given":
+      return describeCornerRisk(context);
+    case "endgame_loss":
+      return pickVariant(seed, [
+        `残り${context.emptyCount}マスの終盤では、この損がほぼそのまま最終石数の差になって返ってきます。`,
+        `終盤は取り返す機会が残っていないため、ここでの評価差は勝敗に直結しやすい損です。`,
+      ]);
+    case "x_square":
+      if (context.ownsAdjacentCorner) {
+        return `${context.chosenLabel}は角の斜め隣（Xマス）ですが、隣の角はすでに自分の石なので、通常ほどの危険はありません。`;
+      }
+      return pickVariant(seed, [
+        `${context.chosenLabel}は角の斜め隣（Xマス）で、ここに置くと相手に角を取られるきっかけを与えやすい形です。`,
+        `Xマス（角の斜め隣）は、相手が角を狙う足がかりになりやすい危険なマスです。`,
+      ]);
+    case "c_square":
+      if (context.ownsAdjacentCorner) {
+        return `${context.chosenLabel}は角の横（Cマス）ですが、隣の角をすでに確保しているため、危険度は下がっています。`;
+      }
+      return pickVariant(seed, [
+        `${context.chosenLabel}は角の横（Cマス）で、角をめぐる攻防で相手に先手を取られやすい位置です。`,
+        `Cマス（角の横）は、辺の攻防から角を取られる展開につながりやすいマスです。`,
+      ]);
+    case "mobility":
+      return describeMobilityChange(context);
+    case "too_many_flips":
+      return `一度に${context.flippedCount}枚返す派手な手ですが、${context.phase === "opening" ? "序盤" : "中盤"}に多く返しすぎると、かえって相手の打てる場所を広げてしまいがちです。`;
+    case "stable_discs_gain":
+      return `返されることのない安定石を${context.stableGain}枚増やせており、着実なプラスです。`;
+    default:
+      // 目立つ危険要因がないのに評価損が大きい手は、位置取りの効率の問題として説明します。
+      if (context.scoreLoss >= 16) {
+        return pickVariant(seed, [
+          `目立つ危険マスや角の失点はありませんが、石の並びや位置取りの効率で最善に及ばない手です。`,
+          `一見自然な手ですが、AIの評価では盤面の形の面でより得な手が残っていました。`,
+        ]);
+      }
+      return describeSafeMove(context);
+  }
+}
+
+function describeCornerRisk(context) {
+  const cornerText = context.cornersGiven.length > 0 ? `角（${context.cornersGiven.join("・")}）` : "角";
+  // 最善級・軽微な手で角が絡む場合は、避けにくい変化なので警告ではなく注意喚起にとどめます。
+  if (context.scoreLoss <= 15) {
+    return `この手の後、相手が${cornerText}に打てるようになる点は要注意ですが、この局面では他の候補でも避けにくく、評価上は許容範囲です。`;
+  }
+  return pickVariant(context.moveNumber, [
+    `この手の後、相手は${cornerText}に打てるようになります。角を取られると周りの石がまとめて安定し、取り返すのが難しくなります。`,
+    `${cornerText}への道を相手に開けてしまった点が問題です。角を渡すと、そこを起点に辺まで固められやすくなります。`,
+  ]);
+}
+
+function describeMobilityChange(context) {
+  const mobility = context.mobility;
   const parts = [];
-  const risky = evaluatedMove.scoreLoss >= 16;
+  if (mobility.opponentLegalMovesAfter > mobility.opponentLegalMovesBefore) {
+    parts.push(`相手の打てる場所が${mobility.opponentLegalMovesBefore}手から${mobility.opponentLegalMovesAfter}手に増え`);
+  }
+  if (mobility.playerLegalMovesAfter < mobility.playerLegalMovesBefore) {
+    parts.push(`自分の打てる場所が${mobility.playerLegalMovesBefore}手から${mobility.playerLegalMovesAfter}手に減り`);
+  }
+  if (parts.length === 0) return describeSafeMove(context);
+  // 良い手の場合、合法手数の増減は避けにくい変化なので、警告口調にしないようにします。
+  if (context.scoreLoss <= 15) {
+    return `この手で${parts.join("、")}ますが、この局面では他の候補も似た傾向で、評価上は許容範囲です。`;
+  }
+  return `この手で${parts.join("、")}、主導権を相手に渡しやすい形になりました。`;
+}
 
-  if (risky) {
-    parts.push(`実際の手は${evaluatedMove.chosenLabel}、AI推奨手は${evaluatedMove.bestLabel}でした。`);
-  } else if (sameMove(evaluatedMove.chosenMove, evaluatedMove.bestMove)) {
-    parts.push(`この局面では${evaluatedMove.chosenLabel}が最善手です。`);
-  } else {
-    parts.push(`この手は大きな問題が少ない手です。AI推奨は${evaluatedMove.bestLabel}でした。`);
+function describeSafeMove(context) {
+  const seed = context.moveNumber;
+  if (context.phase === "endgame") {
+    return pickVariant(seed, [
+      `石数の損得を崩さない進行で、残り${context.emptyCount - 1}マスに向けて堅実です。`,
+      `終盤の計算上も損のない手で、最終盤の石数勝負に備えられています。`,
+    ]);
   }
+  const variants = [
+    `相手に角を渡す形にならず、自分の打てる場所も${context.playerMovesAfterChosen}手残せています。`,
+    `相手の選択肢を${context.opponentMovesAfterChosen}手にとどめつつ、角周辺の危険マスも避けられた手です。`,
+  ];
+  if (context.phase === "opening") {
+    variants.push(`序盤らしく返しすぎを避け、中央寄りで手堅い形を保てています。`);
+  }
+  return pickVariant(seed, variants);
+}
 
-  if (evaluatedMove.reasonTags.includes("corner_taken")) {
-    parts.push("角を取れる良い手です。角は返されないため、安定した有利につながります。");
-  }
-  if (evaluatedMove.reasonTags.includes("x_square")) {
-    parts.push("角の斜め隣に置くため、相手に角を取られる危険が高くなりやすい手です。");
-  }
-  if (evaluatedMove.reasonTags.includes("c_square")) {
-    parts.push("角の横隣に置くため、角をめぐる攻防で不利になりやすい点に注意が必要です。");
-  }
-  if (evaluatedMove.reasonTags.includes("mobility_down")) {
-    parts.push("この手の後、自分の打てる場所が少なくなり、次の展開が苦しくなりやすいです。");
-  }
-  if (evaluatedMove.reasonTags.includes("opponent_mobility_up")) {
-    parts.push("相手の選択肢を増やしてしまうため、主導権を渡しやすい手です。");
-  }
-  if (evaluatedMove.reasonTags.includes("too_many_flips")) {
-    parts.push("序盤・中盤で石を多く返しすぎると、相手に動きやすい形を与えることがあります。");
-  }
-  if (evaluatedMove.reasonTags.includes("endgame_loss")) {
-    parts.push("終盤では最終石数に直結しやすく、この局面では損が大きく出ています。");
-  }
-  if (risky) {
-    parts.push("次からは角周辺の危険マスと、打った後に相手の選択肢が増えないかを先に確認しましょう。");
-  }
+function describeBestAlternative(context) {
+  if (context.isBestChoice || context.scoreLoss < 16 || context.bestLabel === "PASS") return "";
 
-  return parts.join("");
+  if (context.bestIsCorner) {
+    return `代わりにAI推奨の${context.bestLabel}なら、自分から角を確保できました。`;
+  }
+  if (context.givesCorner && !context.bestGivesCorner) {
+    return `AI推奨の${context.bestLabel}なら、角を渡さずに局面を保てました。`;
+  }
+  if (context.opponentMovesAfterBest < context.opponentMovesAfterChosen) {
+    return `AI推奨の${context.bestLabel}なら相手の選択肢を${context.opponentMovesAfterBest}手に絞れていました（実際の手では${context.opponentMovesAfterChosen}手）。`;
+  }
+  if (context.phase === "endgame") {
+    return `${context.bestLabel}のほうが、最終的に残せる石数で勝る計算です。`;
+  }
+  return `AI推奨の${context.bestLabel}は、危険マスを避けつつ自分の選択肢を保てるバランスの良い手でした。`;
+}
+
+function getLearningTip(context) {
+  if (context.scoreLoss < 16) return "";
+  const seed = context.moveNumber;
+
+  switch (selectMainFactor(context)) {
+    case "corner_given":
+      return pickVariant(seed, [
+        `次からは打つ前に「この手で相手が角に届くようにならないか」をひと呼吸置いて確認しましょう。`,
+        `角を渡す手は一気に形勢が傾きます。次からは角への通り道を開けていないか、先に見る習慣をつけましょう。`,
+      ]);
+    case "x_square":
+    case "c_square":
+      return pickVariant(seed, [
+        `次からは角の周り（X・Cマス）は、角を確保できる見通しが立つまで我慢することを意識しましょう。`,
+        `X・Cマスは角を失うきっかけになりがちです。次からは他に安全な手がないか先に探してみましょう。`,
+      ]);
+    case "mobility":
+    case "too_many_flips":
+      return pickVariant(seed, [
+        `次からは返す枚数よりも「打った後にお互い何手打てるか」を数える意識を持ちましょう。`,
+        `序盤・中盤は石数より選択肢の多さが力になります。次からは相手の打てる場所を増やさない手を優先しましょう。`,
+      ]);
+    case "endgame_loss":
+      return pickVariant(seed, [
+        `終盤は残りのマスを数えて、1手ごとの石数の増減を確かめてから打ちましょう。`,
+        `次からは終盤に入ったら、候補手ごとの最終石数の差を意識して選びましょう。`,
+      ]);
+    default:
+      return `次からは角・危険マス・お互いの打てる場所の3点を、順に確認してから打ちましょう。`;
+  }
 }
 
 function generateExplanationPayload(moveRecord, evaluatedMove, analysis) {
@@ -1225,8 +1469,8 @@ async function getExplanation(moveRecord, evaluatedMove, analysis) {
     return { explanation: gptExplanation, source: "gpt" };
   }
   return {
-    explanation: generateTemplateExplanation(evaluatedMove),
-    source: "template",
+    explanation: generateLocalExplanation(buildExplanationContext(moveRecord, evaluatedMove, analysis)),
+    source: "local",
   };
 }
 

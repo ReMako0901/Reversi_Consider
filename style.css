@@ -777,6 +777,47 @@ body:not(.cpu-mode) .cpu-settings {
   line-height: 1.8;
 }
 
+.summary-content {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-size: 0.85rem;
+}
+
+.summary-section h3 {
+  margin: 0 0 2px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+
+.summary-section p {
+  margin: 0;
+  line-height: 1.8;
+}
+
+.summary-note {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.summary-jump {
+  margin-top: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--card);
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--ink-sub);
+}
+
+.summary-jump:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
 .ranking-list {
   margin: 0;
   padding: 0;
