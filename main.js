@@ -2051,7 +2051,7 @@ function exportGameJson() {
   const counts = countDiscs(board);
   const data = {
     version: 1,
-    app: "Reversi_Consider",
+    app: "64 Insight",
     title: currentGameTitle || "棋譜",
     createdAt: new Date().toISOString(),
     moves,
