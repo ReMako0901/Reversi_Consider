@@ -19,6 +19,58 @@ const ENDGAME_EXACT_EMPTY_LIMIT = 10;
 const TERMINAL_DISC_WEIGHT = 16;
 const TERMINAL_WIN_BONUS = 120;
 const EXPLAIN_API_URL = null;
+const CPU_LEVELS = ["easy", "normal", "hard", "persona"];
+const CPU_PERSONAS = ["kid", "cornerHunter", "cautious", "gambler"];
+const PERSONA_LABELS = {
+  kid: "小学生",
+  cornerHunter: "角ハンター",
+  cautious: "慎重派",
+  gambler: "ギャンブラー",
+};
+const PERSONA_MOOD_LABELS = {
+  normal: "通常",
+  winning: "勝ってる",
+  losing: "負けてる",
+  win: "勝利確定",
+  lose: "敗北確定",
+  loseExtra: "敗北確定",
+  bigFlip: "いっぱいひっくり返した",
+  bigFlipped: "いっぱいひっくり返された",
+  comeback: "逆転された",
+};
+const PERSONA_MOOD_FILES = {
+  normal: "normal",
+  winning: "winning",
+  losing: "losing",
+  win: "win",
+  lose: "lose",
+  bigFlip: "big-flip",
+  bigFlipped: "big-flipped",
+  comeback: "comeback",
+};
+const PERSONA_IMAGE_SOURCES = {
+  kid: {
+    normal: "assets/pictures/unique_AI/junior/junior_default.png",
+    winning: "assets/pictures/unique_AI/junior/junior_1.png",
+    losing: "assets/pictures/unique_AI/junior/junior_2.png",
+    win: "assets/pictures/unique_AI/junior/junior_3.png",
+    lose: "assets/pictures/unique_AI/junior/junior_4.png",
+    bigFlip: "assets/pictures/unique_AI/junior/junior_5.png",
+    bigFlipped: "assets/pictures/unique_AI/junior/junior_6.png",
+    comeback: "assets/pictures/unique_AI/junior/junior_7.png",
+  },
+  cautious: {
+    normal: "assets/pictures/unique_AI/cautious/cautious_default.png",
+    winning: "assets/pictures/unique_AI/cautious/cautious_1.png",
+    losing: "assets/pictures/unique_AI/cautious/cautious_2.png",
+    win: "assets/pictures/unique_AI/cautious/cautious_3.png",
+    lose: "assets/pictures/unique_AI/cautious/cautious_4.png",
+    loseExtra: "assets/pictures/unique_AI/cautious/cautious_Extra.png",
+    bigFlip: "assets/pictures/unique_AI/cautious/cautious_5.png",
+    bigFlipped: "assets/pictures/unique_AI/cautious/cautious_6.png",
+    comeback: "assets/pictures/unique_AI/cautious/cautious_7.png",
+  },
+};
 
 let board = [];
 let currentPlayer = BLACK;
@@ -34,12 +86,14 @@ let humanPlayer = BLACK;
 let cpuPlayer = WHITE;
 let isCpuThinking = false;
 let cpuLevel = "normal";
+let cpuPersona = "kid";
 let cpuThinkingTimer = null;
 let cpuMoveRequestId = 0;
 let sideSelectionPending = false;
 let currentGameTitle = "棋譜";
 let isReviewBatchAnalyzing = false;
 let reviewBatchAnalysisId = 0;
+let personaEndMoodOverride = null;
 
 const elements = {
   board: document.querySelector("#board"),
@@ -62,6 +116,13 @@ const elements = {
   jsonExportButton: document.querySelector("#jsonExportButton"),
   importExportMessage: document.querySelector("#importExportMessage"),
   cpuLevelSelect: document.querySelector("#cpuLevelSelect"),
+  personaField: document.querySelector("#personaField"),
+  personaSelect: document.querySelector("#personaSelect"),
+  personaStandPanel: document.querySelector("#personaStandPanel"),
+  personaStandImage: document.querySelector("#personaStandImage"),
+  personaStandFallback: document.querySelector("#personaStandFallback"),
+  personaStandName: document.querySelector("#personaStandName"),
+  personaStandMood: document.querySelector("#personaStandMood"),
   searchDepthField: document.querySelector("#searchDepthField"),
   depthSelect: document.querySelector("#depthSelect"),
   reviewControls: document.querySelector("#reviewControls"),
@@ -99,6 +160,7 @@ function initGame() {
   moveHistory = [];
   analysisHistory = [];
   analyzingMoveNumbers = new Set();
+  personaEndMoodOverride = null;
   renderAll();
   maybeTriggerCpuMove();
 }
@@ -174,13 +236,20 @@ function renderStatus() {
   elements.cpuModeButton.classList.toggle("active", gameMode === "cpu");
   elements.humanModeButton.disabled = mode === "review" || isCpuThinking;
   elements.cpuModeButton.disabled = mode === "review" || isCpuThinking;
-  elements.cpuLevelSelect.disabled = gameMode !== "cpu" || mode === "review" || isCpuThinking;
+  elements.cpuLevelSelect.value = cpuLevel;
+  elements.personaSelect.value = cpuPersona;
+  const cpuSettingsLocked = areCpuSettingsLocked();
+  elements.cpuLevelSelect.disabled = gameMode !== "cpu" || mode === "review" || isCpuThinking || cpuSettingsLocked;
+  elements.personaField.classList.toggle("hidden", mode !== "play" || gameMode !== "cpu" || cpuLevel !== "persona");
+  elements.personaSelect.disabled =
+    gameMode !== "cpu" || cpuLevel !== "persona" || mode === "review" || isCpuThinking || cpuSettingsLocked;
   elements.searchDepthField.classList.toggle("hidden", mode !== "play" || gameMode !== "cpu" || cpuLevel !== "hard");
-  elements.depthSelect.disabled = gameMode !== "cpu" || cpuLevel !== "hard" || mode === "review" || isCpuThinking;
+  elements.depthSelect.disabled = gameMode !== "cpu" || cpuLevel !== "hard" || mode === "review" || isCpuThinking || cpuSettingsLocked;
   elements.nextBranchButton.disabled = mode !== "review" || getNextBranchIndex(reviewIndex) === null || isReviewBatchAnalyzing;
   elements.cpuThinkingLabel.classList.toggle("hidden", !isCpuThinking);
   elements.sideChoiceOverlay.classList.toggle("hidden", mode !== "play" || gameMode !== "cpu" || !sideSelectionPending);
   elements.analysisLoadingOverlay.classList.toggle("hidden", !isReviewBatchAnalyzing);
+  renderPersonaStand();
 
   if (mode === "review") {
     const record = moveHistory[reviewIndex];
@@ -213,6 +282,88 @@ function renderStatus() {
   } else {
     elements.message.textContent = `${playerLabel(currentPlayer)}の手番です。`;
   }
+}
+
+function renderPersonaStand() {
+  const shouldShow = mode === "play" && gameMode === "cpu" && cpuLevel === "persona";
+  elements.personaStandPanel.classList.toggle("hidden", !shouldShow);
+  if (!shouldShow) return;
+
+  const mood = getPersonaMood();
+  const personaName = PERSONA_LABELS[cpuPersona] || "ユニークAI";
+  const moodLabel = PERSONA_MOOD_LABELS[mood] || PERSONA_MOOD_LABELS.normal;
+  const imageSrc = getPersonaImageSrc(cpuPersona, mood);
+
+  elements.personaStandName.textContent = personaName;
+  elements.personaStandMood.textContent = moodLabel;
+  elements.personaStandImage.alt = `${personaName} ${moodLabel}`;
+
+  if (elements.personaStandImage.dataset.src === imageSrc) return;
+  elements.personaStandImage.dataset.src = imageSrc;
+  elements.personaStandImage.onload = () => {
+    elements.personaStandImage.classList.remove("hidden");
+    elements.personaStandFallback.classList.add("hidden");
+  };
+  elements.personaStandImage.onerror = () => {
+    elements.personaStandImage.classList.add("hidden");
+    elements.personaStandFallback.classList.remove("hidden");
+  };
+  elements.personaStandImage.src = imageSrc;
+}
+
+function getPersonaImageSrc(persona, mood) {
+  if (PERSONA_IMAGE_SOURCES[persona]?.[mood]) return PERSONA_IMAGE_SOURCES[persona][mood];
+  return `assets/personas/${persona}/${PERSONA_MOOD_FILES[mood] || PERSONA_MOOD_FILES.normal}.png`;
+}
+
+function getPersonaMood() {
+  if (gameOver) {
+    const counts = countDiscs(board);
+    const cpuCount = getCountForPlayer(counts, cpuPlayer);
+    const humanCount = getCountForPlayer(counts, humanPlayer);
+    if (cpuCount > humanCount) return "win";
+    if (cpuCount < humanCount) return getPersonaDefeatMood(cpuCount, humanCount);
+    return "normal";
+  }
+
+  const lastRecord = moveHistory[moveHistory.length - 1];
+  if (lastRecord && lastRecord.actor === "human" && didHumanReverseLead(lastRecord)) return "comeback";
+  if (lastRecord && lastRecord.actor === "cpu" && lastRecord.flipped.length >= 4) return "bigFlip";
+  if (lastRecord && lastRecord.actor === "human" && lastRecord.flipped.length >= 4) return "bigFlipped";
+
+  const counts = countDiscs(board);
+  const cpuCount = getCountForPlayer(counts, cpuPlayer);
+  const humanCount = getCountForPlayer(counts, humanPlayer);
+  if (cpuCount >= humanCount + 4) return "winning";
+  if (cpuCount + 4 <= humanCount) return "losing";
+  return "normal";
+}
+
+function didHumanReverseLead(record) {
+  const before = countDiscs(record.boardBefore);
+  const cpuBefore = getCountForPlayer(before, cpuPlayer);
+  const humanBefore = getCountForPlayer(before, humanPlayer);
+  const cpuAfter = getCountForPlayer(record, cpuPlayer);
+  const humanAfter = getCountForPlayer(record, humanPlayer);
+  return cpuBefore > humanBefore && cpuAfter < humanAfter;
+}
+
+function getPersonaDefeatMood(cpuCount, humanCount) {
+  if (cpuPersona !== "cautious") return "lose";
+  if (personaEndMoodOverride) return personaEndMoodOverride;
+
+  if (cpuCount === 0 && humanCount > 0) {
+    personaEndMoodOverride = Math.random() < 0.5 ? "loseExtra" : "lose";
+  } else if (cpuCount <= 5) {
+    personaEndMoodOverride = Math.random() < 0.1 ? "loseExtra" : "lose";
+  } else {
+    personaEndMoodOverride = "lose";
+  }
+  return personaEndMoodOverride;
+}
+
+function getCountForPlayer(counts, player) {
+  return player === BLACK ? (counts.black ?? counts.blackCount) : (counts.white ?? counts.whiteCount);
 }
 
 function getDisplayBoard() {
@@ -382,9 +533,29 @@ function chooseHumanSide(player) {
 }
 
 function setCpuLevel(level) {
-  if (!["easy", "normal", "hard"].includes(level)) return;
+  if (!CPU_LEVELS.includes(level)) return;
+  if (areCpuSettingsLocked()) {
+    renderStatus();
+    return;
+  }
   cpuLevel = level;
+  elements.cpuLevelSelect.value = cpuLevel;
   renderStatus();
+}
+
+function setCpuPersona(persona) {
+  if (!CPU_PERSONAS.includes(persona)) return;
+  if (areCpuSettingsLocked()) {
+    renderStatus();
+    return;
+  }
+  cpuPersona = persona;
+  elements.personaSelect.value = cpuPersona;
+  renderStatus();
+}
+
+function areCpuSettingsLocked() {
+  return mode === "play" && gameMode === "cpu" && (!sideSelectionPending || moveHistory.length > 0);
 }
 
 function isCpuTurn() {
@@ -508,7 +679,16 @@ function makeCpuMove() {
 function chooseCpuMove(targetBoard, player) {
   if (cpuLevel === "easy") return chooseRandomMove(targetBoard, player);
   if (cpuLevel === "hard") return chooseSearchMove(targetBoard, player);
+  if (cpuLevel === "persona") return choosePersonaCpuMove(targetBoard, player);
   return chooseHeuristicMove(targetBoard, player);
+}
+
+function choosePersonaCpuMove(targetBoard, player) {
+  if (cpuPersona === "kid") return choosePersonaMove(targetBoard, player, scoreKidMove);
+  if (cpuPersona === "cornerHunter") return chooseCornerHunterMove(targetBoard, player);
+  if (cpuPersona === "cautious") return chooseCautiousMove(targetBoard, player);
+  if (cpuPersona === "gambler") return choosePersonaMove(targetBoard, player, scoreGamblerMove);
+  return choosePersonaMove(targetBoard, player, scoreKidMove);
 }
 
 function chooseRandomMove(targetBoard, player) {
@@ -535,6 +715,127 @@ function chooseSearchMove(targetBoard, player) {
     if (analysis && analysis.bestMove) return analysis.bestMove;
   }
   return chooseHeuristicMove(targetBoard, player);
+}
+
+function choosePersonaMove(targetBoard, player, scoreFn) {
+  const legalMoves = getLegalMoves(targetBoard, player);
+  if (legalMoves.length === 0) return null;
+  const scoredMoves = legalMoves.map((move) => ({
+    move,
+    score: scoreFn(targetBoard, player, move),
+  }));
+  const bestScore = Math.max(...scoredMoves.map((item) => item.score));
+  const bestMoves = scoredMoves.filter((item) => item.score === bestScore);
+  return bestMoves[Math.floor(Math.random() * bestMoves.length)].move;
+}
+
+function chooseCornerHunterMove(targetBoard, player) {
+  const legalMoves = getLegalMoves(targetBoard, player);
+  if (legalMoves.length === 0) return null;
+
+  const cornerMoves = legalMoves.filter((move) => isCorner(move.row, move.col));
+  if (cornerMoves.length > 0) return chooseBestPersonaMove(targetBoard, player, cornerMoves, scoreCornerHunterMove);
+
+  const edgeMoves = legalMoves.filter((move) => isEdge(move.row, move.col));
+  if (edgeMoves.length > 0) return chooseBestPersonaMove(targetBoard, player, edgeMoves, scoreCornerHunterMove);
+
+  return chooseBestPersonaMove(targetBoard, player, legalMoves, scoreCornerHunterMove);
+}
+
+function chooseBestPersonaMove(targetBoard, player, moves, scoreFn) {
+  const scoredMoves = moves.map((move) => ({
+    move,
+    score: scoreFn(targetBoard, player, move),
+  }));
+  const bestScore = Math.max(...scoredMoves.map((item) => item.score));
+  const bestMoves = scoredMoves.filter((item) => item.score === bestScore);
+  return bestMoves[Math.floor(Math.random() * bestMoves.length)].move;
+}
+
+function chooseCautiousMove(targetBoard, player) {
+  const legalMoves = getLegalMoves(targetBoard, player);
+  if (legalMoves.length === 0) return null;
+  if (isCautiousPanicPosition(targetBoard, player)) {
+    return chooseBestPersonaMove(targetBoard, player, legalMoves, scoreCautiousPanicMove);
+  }
+  return chooseBestPersonaMove(targetBoard, player, legalMoves, scoreCautiousMove);
+}
+
+function scoreKidMove(targetBoard, player, move) {
+  return getFlippableDiscs(targetBoard, move.row, move.col, player).length;
+}
+
+function scoreCornerHunterMove(targetBoard, player, move) {
+  let score = 0;
+  if (isCorner(move.row, move.col)) score += 10000;
+  if (isEdge(move.row, move.col)) score += 600;
+  if (isCSquare(move.row, move.col)) score += 120;
+  if (isXSquare(move.row, move.col)) score += 40;
+  score += stableGainAfterMove(targetBoard, player, move) * 200;
+  score += getFlippableDiscs(targetBoard, move.row, move.col, player).length * 8;
+  return score;
+}
+
+function scoreCautiousMove(targetBoard, player, move) {
+  const opponent = getOpponent(player);
+  const nextBoard = applyMove(targetBoard, move.row, move.col, player);
+  const flippedCount = getFlippableDiscs(targetBoard, move.row, move.col, player).length;
+  const isSafeAnchor = isCorner(move.row, move.col) || isEdge(move.row, move.col);
+  const isOneDiscMove = flippedCount === 1;
+  let score = 0;
+
+  if (isCorner(move.row, move.col)) score += 1200;
+  if (wouldGiveCorner(targetBoard, player, move)) score += isOneDiscMove ? 80 : -1400;
+  if (isXSquare(move.row, move.col)) score += isOneDiscMove ? 260 : -800;
+  if (isCSquare(move.row, move.col)) score += isOneDiscMove ? 180 : -500;
+  if (isEdge(move.row, move.col)) score += 120;
+
+  score += isOneDiscMove ? 1600 : 0;
+  score += getLegalMoves(nextBoard, player).length * (isOneDiscMove ? 8 : 35);
+  score -= getLegalMoves(nextBoard, opponent).length * (isOneDiscMove ? 6 : 45);
+  if (flippedCount >= 2 && !isSafeAnchor) {
+    score -= 900 + (flippedCount - 2) * 220;
+  } else if (flippedCount >= 2) {
+    score -= (flippedCount - 1) * 45;
+  }
+  score += stableGainAfterMove(targetBoard, player, move) * 100;
+  return score;
+}
+
+function isCautiousPanicPosition(targetBoard, player) {
+  const counts = countDiscs(targetBoard);
+  const opponent = getOpponent(player);
+  const discDiff = counts[player] - counts[opponent];
+  const emptyCount = getEmptyCount(targetBoard);
+  return discDiff <= -8 || (emptyCount <= 18 && discDiff <= -4);
+}
+
+function scoreCautiousPanicMove(targetBoard, player, move) {
+  const opponent = getOpponent(player);
+  const nextBoard = applyMove(targetBoard, move.row, move.col, player);
+  const flippedCount = getFlippableDiscs(targetBoard, move.row, move.col, player).length;
+  let score = -scoreCpuMove(targetBoard, player, move);
+
+  if (wouldGiveCorner(targetBoard, player, move)) score += 1400;
+  if (isXSquare(move.row, move.col)) score += 900;
+  if (isCSquare(move.row, move.col)) score += 650;
+  if (isCorner(move.row, move.col)) score -= 1800;
+  if (isEdge(move.row, move.col)) score -= 250;
+
+  score += getLegalMoves(nextBoard, opponent).length * 70;
+  score += flippedCount * 90;
+  return score;
+}
+
+function scoreGamblerMove(targetBoard, player, move) {
+  const flippedCount = getFlippableDiscs(targetBoard, move.row, move.col, player).length;
+  let score = flippedCount * 120;
+  if (isCorner(move.row, move.col)) score += 700;
+  if (isEdge(move.row, move.col)) score += 180;
+  if (isXSquare(move.row, move.col)) score += 160;
+  if (isCSquare(move.row, move.col)) score += 120;
+  if (wouldGiveCorner(targetBoard, player, move)) score += 60;
+  return score;
 }
 
 function scoreCpuMove(targetBoard, player, move) {
@@ -2058,6 +2359,8 @@ function exportGameJson() {
     gameMode,
     humanPlayer,
     cpuPlayer,
+    cpuLevel,
+    cpuPersona,
     result: gameOver ? getResultText(counts) : null,
     moveRecords: moveHistory.map((record) => ({
       moveNumber: record.moveNumber,
@@ -2126,12 +2429,16 @@ function normalizeGameData(data) {
   const importedGameMode = data.gameMode === "cpu" ? "cpu" : "human";
   const importedHumanPlayer = data.humanPlayer === WHITE ? WHITE : BLACK;
   const importedCpuPlayer = getOpponent(importedHumanPlayer);
+  const importedCpuLevel = CPU_LEVELS.includes(data.cpuLevel) ? data.cpuLevel : "normal";
+  const importedCpuPersona = CPU_PERSONAS.includes(data.cpuPersona) ? data.cpuPersona : "kid";
   return {
     title,
     moves: data.moves.map((move) => move.trim().toLowerCase()),
     gameMode: importedGameMode,
     humanPlayer: importedGameMode === "cpu" ? importedHumanPlayer : BLACK,
     cpuPlayer: importedGameMode === "cpu" ? importedCpuPlayer : WHITE,
+    cpuLevel: importedGameMode === "cpu" ? importedCpuLevel : "normal",
+    cpuPersona: importedGameMode === "cpu" ? importedCpuPersona : "kid",
   };
 }
 
@@ -2170,6 +2477,8 @@ function applyImportedMoves(gameData) {
   gameMode = gameData.gameMode;
   humanPlayer = gameData.humanPlayer;
   cpuPlayer = gameData.cpuPlayer;
+  cpuLevel = gameData.cpuLevel;
+  cpuPersona = gameData.cpuPersona;
   board = createInitialBoard();
   currentPlayer = BLACK;
   gameOver = false;
@@ -2250,7 +2559,14 @@ elements.nextBranchButton.addEventListener("click", goToNextBranch);
 elements.cpuLevelSelect.addEventListener("change", (event) => {
   setCpuLevel(event.target.value);
 });
+elements.personaSelect.addEventListener("change", (event) => {
+  setCpuPersona(event.target.value);
+});
 elements.depthSelect.addEventListener("change", (event) => {
+  if (areCpuSettingsLocked()) {
+    elements.depthSelect.value = String(searchDepth);
+    return;
+  }
   searchDepth = Number(event.target.value);
   analysisHistory = [];
   if (mode === "review") {

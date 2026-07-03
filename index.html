@@ -96,11 +96,21 @@
             </div>
             <div class="cpu-settings">
               <label class="field">
-                <span>CPU難易度</span>
+                <span>CPUタイプ</span>
                 <select id="cpuLevelSelect">
                   <option value="easy">easy: ランダム</option>
                   <option value="normal" selected>normal: 簡易評価</option>
                   <option value="hard">hard: 探索AI</option>
+                  <option value="persona">ユニークAI</option>
+                </select>
+              </label>
+              <label id="personaField" class="field hidden">
+                <span>ペルソナ</span>
+                <select id="personaSelect">
+                  <option value="kid" selected>小学生: とにかく多く返す</option>
+                  <option value="cornerHunter">角ハンター: 角と辺が好き</option>
+                  <option value="cautious">慎重派: 1石取り信仰</option>
+                  <option value="gambler">ギャンブラー: 派手な手を好む</option>
                 </select>
               </label>
               <label id="searchDepthField" class="field hidden">
@@ -128,6 +138,15 @@
             <p class="onboarding-hint">
               対局が終わったら「検討する」で1手ずつ振り返れます。保存した棋譜（JSON）を読み込むと、そのまま検討を始められます。
             </p>
+          </section>
+
+          <section id="personaStandPanel" class="persona-stand hidden" aria-live="polite">
+            <img id="personaStandImage" class="persona-stand-image hidden" src="" alt="" />
+            <div id="personaStandFallback" class="persona-stand-fallback">
+              <span id="personaStandName">ユニークAI</span>
+              <strong>立ち絵準備中</strong>
+              <small id="personaStandMood">通常</small>
+            </div>
           </section>
 
           <section id="analysisPanel" class="panel review-panel hidden">

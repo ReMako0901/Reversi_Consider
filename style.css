@@ -706,6 +706,64 @@ body:not(.cpu-mode) .cpu-settings {
   color: var(--muted);
 }
 
+.persona-stand {
+  display: none;
+}
+
+@media (min-width: 921px) {
+  .persona-stand {
+    position: relative;
+    display: flex;
+    align-items: stretch;
+    justify-content: center;
+    width: 100%;
+    min-height: 300px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius);
+    background: #fff;
+    overflow: hidden;
+  }
+
+  .persona-stand-image {
+    width: 100%;
+    height: 300px;
+    object-fit: contain;
+    object-position: center bottom;
+    background: #fff;
+  }
+
+  .persona-stand-fallback {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    width: 100%;
+    min-height: 300px;
+    padding: 20px;
+    color: var(--ink-sub);
+    text-align: center;
+  }
+
+  .persona-stand-fallback span {
+    font-size: 0.78rem;
+    color: var(--muted);
+  }
+
+  .persona-stand-fallback strong {
+    font-size: 1.05rem;
+    color: var(--ink);
+  }
+
+  .persona-stand-fallback small {
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 2px 10px;
+    background: var(--bg);
+    color: var(--muted);
+  }
+}
+
 /* 10. 解析系ウィジェット ------------------------------------------------------ */
 .analysis-summary {
   display: grid;
